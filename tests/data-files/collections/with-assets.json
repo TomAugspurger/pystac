@@ -11,12 +11,12 @@
     },
     {
       "rel": "item",
-      "href": "./area-1-1-imagery/area-1-1-imagery.json",
+      "href": "catalogs/test-case-1/country-1/area-1-1/area-1-1-imagery/area-1-1-imagery.json",
       "type": "application/json"
     },
     {
       "rel": "item",
-      "href": "./area-1-1-labels/area-1-1-labels.json",
+      "href": "catalogs/test-case-1/country-1/area-1-1//area-1-1-labels/area-1-1-labels.json",
       "type": "application/json"
     },
     {
