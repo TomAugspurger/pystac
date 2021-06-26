@@ -5,6 +5,18 @@ https://github.com/stac-extensions/datacube
 
 from abc import ABC
 from typing import Any, Dict, Generic, List, Optional, Set, TypeVar, Union, cast
+from enum import Enum
+from typing import (
+    Any,
+    Dict,
+    Generic,
+    List,
+    Optional,
+    Set,
+    TypeVar,
+    Union,
+    cast,
+)
 
 import pystac
 from pystac.extensions.base import (
@@ -29,6 +41,8 @@ DIM_VALUES_PROP = "values"
 DIM_STEP_PROP = "step"
 DIM_REF_SYS_PROP = "reference_system"
 DIM_UNIT_PROP = "unit"
+VARIABLES_PROP = "cube:variables"
+VAR_DIM_PROP = "dimensions"
 
 
 class Dimension(ABC):
@@ -310,13 +324,51 @@ class AdditionalDimension(Dimension):
             self.properties[DIM_REF_SYS_PROP] = v
 
 
+class VariableType(str, Enum):
+    DATA = "data"
+    AUXILIARY = "auxiliary"
+
+    def __str__(self):
+        return self.value
+
+
+class Variable:
+    dimensions: _Property[List[str]] = _Property(
+        VAR_DIM_PROP, VARIABLES_PROP, required=True
+    )
+    type: _Property[VariableType] = _Property(
+        DIM_TYPE_PROP, VARIABLES_PROP, required=True
+    )
+    description: _Property[Optional[str]] = _Property(DIM_DESC_PROP)
+    extent: _Property[Optional[Union[List[float], List[int], List[str]]]] = _Property(
+        DIM_EXTENT_PROP
+    )
+    values: _Property[Optional[List[float]]] = _Property(DIM_VALUES_PROP)
+    unit: _Property[Optional[str]] = _Property(DIM_UNIT_PROP)
+
+    def __init__(self, properties: Dict[str, Any]) -> None:
+        self.properties = properties
+
+    def to_dict(self) -> Dict[str, Any]:
+        return self.properties
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> "Variable":
+        return Variable(d)
+
+
 class DatacubeExtension(
     Generic[T],
     PropertiesExtension,
     ExtensionManagementMixin[Union[pystac.Collection, pystac.Item]],
 ):
-    def apply(self, dimensions: Dict[str, Dimension]) -> None:
+    def apply(
+        self,
+        dimensions: Dict[str, Dimension],
+        variables: Optional[Dict[str, Variable]] = None,
+    ) -> None:
         self.dimensions = dimensions
+        self.variables = variables or {}
 
     @property
     def dimensions(self) -> Dict[str, Dimension]:
@@ -332,6 +384,21 @@ class DatacubeExtension(
     @dimensions.setter
     def dimensions(self, v: Dict[str, Dimension]) -> None:
         self._set_property(DIMENSIONS_PROP, {k: dim.to_dict() for k, dim in v.items()})
+
+    @property
+    def variables(self) -> Dict[str, Variable]:
+        return get_required(
+            map_opt(
+                lambda d: {k: Variable.from_dict(v) for k, v in d.items()},
+                self._get_property(VARIABLES_PROP, Dict[str, Any]),
+            ),
+            self,
+            VARIABLES_PROP,
+        )
+
+    @variables.setter
+    def variables(self, v: Dict[str, Variable]) -> None:
+        self._set_property(VARIABLES_PROP, {k: dim.to_dict() for k, dim in v.items()})
 
     @classmethod
     def get_schema_uri(cls) -> str:

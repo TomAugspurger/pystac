@@ -97,6 +97,24 @@
                     "blue"
                 ]
             }
+        },
+        "cube:variables": {
+            "tmax": {
+                "type": "data",
+                "dimensions": ["time", "y", "x", "pressure_levels"],
+                "description": "Maximum temperature",
+                "unit": "degrees C",
+                "extent": [0, 100]
+            },
+            "lat": {
+                "type": "auxiliary",
+                "dimensions": ["y", "x"]
+            },
+            "lambert_conformal_conic": {
+                "type": "auxiliary",
+                "dimensions": [],
+                "description": "A dimensionless variable"
+            }
         }
     },
     "assets": {

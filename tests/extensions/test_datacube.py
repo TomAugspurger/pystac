@@ -61,3 +61,21 @@ class DatacubeTest(unittest.TestCase):
             DatacubeExtension.ext,
             object(),
         )
+
+    def test_clear_step(self) -> None:
+        item = pystac.Item.from_file(self.example_uri)
+        ext = DatacubeExtension.ext(item)
+        dim = ext.dimensions["pressure_levels"]
+        assert isinstance(dim, AdditionalDimension)
+
+        assert dim.step == 100
+        dim.step = None
+        assert "step" in dim.properties
+        dim.clear_step()
+        assert "step" not in dim.properties
+
+    def test_variable(self) -> None:
+        item = pystac.Item.from_file(self.example_uri)
+        ext = DatacubeExtension(item)
+        assert 0
+
