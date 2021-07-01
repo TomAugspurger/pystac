@@ -104,11 +104,16 @@
                 "dimensions": ["time", "y", "x", "pressure_levels"],
                 "description": "Maximum temperature",
                 "unit": "degrees C",
-                "extent": [0, 100]
+                "extent": [0, 100],
+                "values": [0, 10, 100]
             },
             "lat": {
                 "type": "auxiliary",
-                "dimensions": ["y", "x"]
+                "dimensions": ["y", "x"],
+                "extent": [
+                    37.48803556,
+                    37.613537207
+                ]
             },
             "lambert_conformal_conic": {
                 "type": "auxiliary",

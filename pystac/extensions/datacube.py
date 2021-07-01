@@ -6,17 +6,6 @@ https://github.com/stac-extensions/datacube
 from abc import ABC
 from typing import Any, Dict, Generic, List, Optional, Set, TypeVar, Union, cast
 from enum import Enum
-from typing import (
-    Any,
-    Dict,
-    Generic,
-    List,
-    Optional,
-    Set,
-    TypeVar,
-    Union,
-    cast,
-)
 
 import pystac
 from pystac.extensions.base import (
@@ -328,26 +317,103 @@ class VariableType(str, Enum):
     DATA = "data"
     AUXILIARY = "auxiliary"
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.value
 
 
 class Variable:
-    dimensions: _Property[List[str]] = _Property(
-        VAR_DIM_PROP, VARIABLES_PROP, required=True
-    )
-    type: _Property[VariableType] = _Property(
-        DIM_TYPE_PROP, VARIABLES_PROP, required=True
-    )
-    description: _Property[Optional[str]] = _Property(DIM_DESC_PROP)
-    extent: _Property[Optional[Union[List[float], List[int], List[str]]]] = _Property(
-        DIM_EXTENT_PROP
-    )
-    values: _Property[Optional[List[float]]] = _Property(DIM_VALUES_PROP)
-    unit: _Property[Optional[str]] = _Property(DIM_UNIT_PROP)
-
     def __init__(self, properties: Dict[str, Any]) -> None:
         self.properties = properties
+
+    # --- Properties ---
+
+    @property
+    def dimensions(self) -> List[str]:
+        return get_required(
+            self.properties.get(VAR_DIM_PROP),
+            "cube:variables",
+            VARIABLES_PROP,
+        )
+
+    @dimensions.setter
+    def dimensions(self, v: List[str]) -> None:
+        self.properties[VAR_DIM_PROP] = v
+
+    @property
+    def var_type(self) -> VariableType:
+        return get_required(
+            self.properties.get(DIM_TYPE_PROP),
+            "cube:variables",
+            VARIABLES_PROP,
+        )
+
+    @var_type.setter
+    def var_type(self, v: VariableType) -> None:
+        self.properties[DIM_TYPE_PROP] = v
+
+    @property
+    def description(self) -> Optional[str]:
+        return self.properties.get(DIM_DESC_PROP)
+
+    @description.setter
+    def description(self, v: Optional[str]) -> None:
+        if v is None:
+            self.properties.pop(DIM_DESC_PROP, None)
+        else:
+            self.properties[DIM_DESC_PROP] = v
+
+    @property
+    def extent(
+        self,
+    ) -> Optional[
+        Union[List[Optional[float]], List[Optional[int]], List[Optional[str]]]
+    ]:
+        return self.properties.get(DIM_EXTENT_PROP)
+
+    @extent.setter
+    def extent(
+        self,
+        v: Optional[
+            Union[List[Optional[float]], List[Optional[int]], List[Optional[str]]]
+        ],
+    ) -> None:
+        if v is None:
+            self.properties.pop(DIM_EXTENT_PROP, None)
+        else:
+            self.properties[DIM_EXTENT_PROP] = v
+
+    @property
+    def values(
+        self,
+    ) -> Optional[
+        Union[List[Optional[float]], List[Optional[int]], List[Optional[str]]]
+    ]:
+        return self.properties.get(DIM_VALUES_PROP)
+
+    @values.setter
+    def values(
+        self,
+        v: Optional[
+            Union[List[Optional[float]], List[Optional[int]], List[Optional[str]]]
+        ],
+    ) -> None:
+        if v is None:
+            self.properties.pop(DIM_VALUES_PROP, None)
+        else:
+            self.properties[DIM_VALUES_PROP] = v
+
+    @property
+    def unit(self) -> Optional[str]:
+        return self.properties.get(DIM_UNIT_PROP)
+
+    @unit.setter
+    def unit(self, v: Optional[str]) -> None:
+        if v is None:
+            self.properties.pop(DIM_UNIT_PROP, None)
+        else:
+            self.properties[DIM_UNIT_PROP] = v
+
+    # --- Methods ---
 
     def to_dict(self) -> Dict[str, Any]:
         return self.properties
