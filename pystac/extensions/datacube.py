@@ -18,7 +18,7 @@ from pystac.utils import get_required
 
 T = TypeVar("T", pystac.Collection, pystac.Item, pystac.Asset)
 
-SCHEMA_URI = "https://stac-extensions.github.io/datacube/v1.0.0/schema.json"
+SCHEMA_URI = "https://stac-extensions.github.io/datacube/v2.0.0/schema.json"
 
 PREFIX: str = "cube:"
 DIMENSIONS_PROP = PREFIX + "dimensions"
