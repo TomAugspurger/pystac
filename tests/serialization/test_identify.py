@@ -1,5 +1,4 @@
 import unittest
-from urllib.error import HTTPError
 
 import pystac
 from pystac.cache import CollectionCache
@@ -24,12 +23,9 @@ class IdentifyTest(unittest.TestCase):
                 path = example.path
                 d = pystac.StacIO.default().read_json(path)
                 if identify_stac_object_type(d) == pystac.STACObjectType.ITEM:
-                    try:
-                        merge_common_properties(
-                            d, json_href=path, collection_cache=collection_cache
-                        )
-                    except HTTPError:
-                        pass
+                    merge_common_properties(
+                        d, json_href=path, collection_cache=collection_cache
+                    )
 
                 actual = identify_stac_object(d)
                 # Explicitly cover __repr__ functions in tests
@@ -47,6 +43,57 @@ class IdentifyTest(unittest.TestCase):
                     set(actual.extensions), set(example.extensions), msg=msg
                 )
 
+    def test_identify_non_stac_type(self) -> None:
+        plain_feature_dict = {
+            "type": "Feature",
+            "properties": {},
+            "geometry": {"type": "Point", "coordinates": [0, 0]},
+        }
+
+        self.assertIsNone(identify_stac_object_type(plain_feature_dict))
+
+    def test_identify_invalid_stac_object_with_version(self) -> None:
+        # Has stac_version but is not a valid STAC object
+        invalid_dict = {
+            "id": "concepts",
+            "title": "Concepts catalogs",
+            "links": [
+                {
+                    "rel": "self",
+                    "type": "application/json",
+                    "href": "https://tamn.snapplanet.io/catalogs/concepts",
+                },
+                {
+                    "rel": "root",
+                    "type": "application/json",
+                    "href": "https://tamn.snapplanet.io",
+                },
+            ],
+            "stac_version": "1.0.0",
+        }
+
+        with self.assertRaises(pystac.STACTypeError) as ctx:
+            identify_stac_object(invalid_dict)
+
+        self.assertIn("JSON does not represent a STAC object", str(ctx.exception))
+
+    def test_identify_non_stac_raises_error(self) -> None:
+        plain_feature_dict = {
+            "type": "Feature",
+            "properties": {},
+            "geometry": {"type": "Point", "coordinates": [0, 0]},
+        }
+
+        with self.assertRaises(pystac.STACTypeError) as ctx:
+            identify_stac_object(plain_feature_dict)
+
+        self.assertIn("JSON does not represent a STAC object", str(ctx.exception))
+
+    def test_identify_invalid_with_stac_version(self) -> None:
+        not_stac = {"stac_version": "0.9.0", "type": "Custom"}
+
+        self.assertIsNone(identify_stac_object_type(not_stac))
+
 
 class VersionTest(unittest.TestCase):
     def test_version_ordering(self) -> None:
@@ -55,13 +102,10 @@ class VersionTest(unittest.TestCase):
         self.assertFalse(STACVersionID("0.9.0") != STACVersionID("0.9.0"))
         self.assertFalse(STACVersionID("0.9.0") > STACVersionID("0.9.0"))
         self.assertTrue(STACVersionID("1.0.0-beta.2") < "1.0.0")
-        self.assertTrue(STACVersionID("0.9.1") > "0.9.0")  # type:ignore
-        self.assertFalse(STACVersionID("0.9.0") > "0.9.0")  # type:ignore
-        self.assertTrue(STACVersionID("0.9.0") <= "0.9.0")  # type:ignore
-        self.assertTrue(
-            STACVersionID("1.0.0-beta.1")  # type:ignore
-            <= STACVersionID("1.0.0-beta.2")  # type:ignore
-        )
+        self.assertTrue(STACVersionID("0.9.1") > "0.9.0")
+        self.assertFalse(STACVersionID("0.9.0") > "0.9.0")
+        self.assertTrue(STACVersionID("0.9.0") <= "0.9.0")
+        self.assertTrue(STACVersionID("1.0.0-beta.1") <= STACVersionID("1.0.0-beta.2"))
         self.assertFalse(STACVersionID("1.0.0") < STACVersionID("1.0.0-beta.2"))
 
     def test_version_range_ordering(self) -> None:

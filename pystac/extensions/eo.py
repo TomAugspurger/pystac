@@ -3,7 +3,6 @@
 https://github.com/stac-extensions/eo
 """
 
-import re
 from typing import (
     Any,
     Dict,
@@ -11,30 +10,32 @@ from typing import (
     Iterable,
     List,
     Optional,
-    Set,
     Tuple,
     TypeVar,
+    Union,
     cast,
 )
 
 import pystac
-from pystac.collection import RangeSummary
+from pystac.summaries import RangeSummary
 from pystac.extensions.base import (
     ExtensionManagementMixin,
     PropertiesExtension,
     SummariesExtension,
 )
 from pystac.extensions.hooks import ExtensionHooks
-from pystac.extensions import view
+from pystac.extensions import view, projection
 from pystac.serialization.identify import STACJSONDescription, STACVersionID
 from pystac.utils import get_required, map_opt
 
 T = TypeVar("T", pystac.Item, pystac.Asset)
 
-SCHEMA_URI = "https://stac-extensions.github.io/eo/v1.0.0/schema.json"
+SCHEMA_URI: str = "https://stac-extensions.github.io/eo/v1.0.0/schema.json"
+PREFIX: str = "eo:"
 
-BANDS_PROP = "eo:bands"
-CLOUD_COVER_PROP = "eo:cloud_cover"
+# Field names
+BANDS_PROP: str = PREFIX + "bands"
+CLOUD_COVER_PROP: str = PREFIX + "cloud_cover"
 
 
 class Band:
@@ -53,6 +54,7 @@ class Band:
         description: Optional[str] = None,
         center_wavelength: Optional[float] = None,
         full_width_half_max: Optional[float] = None,
+        solar_illumination: Optional[float] = None,
     ) -> None:
         """
         Sets the properties for this Band.
@@ -64,14 +66,17 @@ class Band:
                 of accepted common names <eo#common-band-names>`.
             description : Description to fully explain the band.
             center_wavelength : The center wavelength of the band, in micrometers (μm).
-            full_width_half_max : Full width at half maximum (FWHM). The width of the band,
-                as measured at half the maximum transmission, in micrometers (μm).
-        """  # noqa
+            full_width_half_max : Full width at half maximum (FWHM). The width of the
+                band, as measured at half the maximum transmission, in micrometers (μm).
+            solar_illumination: The solar illumination of the band,
+                as measured at half the maximum transmission, in W/m2/micrometers.
+        """
         self.name = name
         self.common_name = common_name
         self.description = description
         self.center_wavelength = center_wavelength
         self.full_width_half_max = full_width_half_max
+        self.solar_illumination = solar_illumination
 
     @classmethod
     def create(
@@ -81,6 +86,7 @@ class Band:
         description: Optional[str] = None,
         center_wavelength: Optional[float] = None,
         full_width_half_max: Optional[float] = None,
+        solar_illumination: Optional[float] = None,
     ) -> "Band":
         """
         Creates a new band.
@@ -92,9 +98,11 @@ class Band:
                 accepted common names <eo#common-band-names>`.
             description : Description to fully explain the band.
             center_wavelength : The center wavelength of the band, in micrometers (μm).
-            full_width_half_max : Full width at half maximum (FWHM). The width of the band,
-                as measured at half the maximum transmission, in micrometers (μm).
-        """  # noqa
+            full_width_half_max : Full width at half maximum (FWHM). The width of the
+                band, as measured at half the maximum transmission, in micrometers (μm).
+            solar_illumination: The solar illumination of the band,
+                as measured at half the maximum transmission, in W/m2/micrometers.
+        """
         b = cls({})
         b.apply(
             name=name,
@@ -102,6 +110,7 @@ class Band:
             description=description,
             center_wavelength=center_wavelength,
             full_width_half_max=full_width_half_max,
+            solar_illumination=solar_illumination,
         )
         return b
 
@@ -112,7 +121,7 @@ class Band:
         Returns:
             str
         """
-        return get_required(self.properties["name"], self, "name")
+        return get_required(self.properties.get("name"), self, "name")
 
     @name.setter
     def name(self, v: str) -> None:
@@ -126,7 +135,7 @@ class Band:
 
         Returns:
             Optional[str]
-        """  # noqa
+        """
         return self.properties.get("common_name")
 
     @common_name.setter
@@ -186,6 +195,23 @@ class Band:
         else:
             self.properties.pop("full_width_half_max", None)
 
+    @property
+    def solar_illumination(self) -> Optional[float]:
+        """Get or sets the solar illumination of the band,
+            as measured at half the maximum transmission, in W/m2/micrometers.
+
+        Returns:
+            [float]
+        """
+        return self.properties.get("solar_illumination")
+
+    @solar_illumination.setter
+    def solar_illumination(self, v: Optional[float]) -> None:
+        if v is not None:
+            self.properties["solar_illumination"] = v
+        else:
+            self.properties.pop("solar_illumination", None)
+
     def __repr__(self) -> str:
         return "<Band name={}>".format(self.name)
 
@@ -208,7 +234,7 @@ class Band:
         Returns:
             Tuple[float, float] or None: The band range for this name as (min, max), or
             None if this is not a recognized common name.
-        """  # noqa E501
+        """
         name_to_range = {
             "coastal": (0.40, 0.45),
             "blue": (0.45, 0.50),
@@ -239,9 +265,9 @@ class Band:
                 accepted common names <eo#common-band-names>`.
 
         Returns:
-            str or None: If a recognized common name, returns a description including the
-            band range. Otherwise returns None.
-        """  # noqa E501
+            str or None: If a recognized common name, returns a description including
+            the band range. Otherwise returns None.
+        """
         r = Band.band_range(common_name)
         if r is not None:
             return "Common name: {}, Range: {} to {}".format(common_name, r[0], r[1])
@@ -249,22 +275,30 @@ class Band:
 
 
 class EOExtension(
-    Generic[T], PropertiesExtension, ExtensionManagementMixin[pystac.Item]
+    Generic[T],
+    PropertiesExtension,
+    ExtensionManagementMixin[Union[pystac.Item, pystac.Collection]],
 ):
     """An abstract class that can be used to extend the properties of an
-    :class:`~pystac.Item` with properties from the :stac-ext:`Electro-Optical
-    Extension <eo>`. This class is generic over the type of STAC Object to be
-    extended (e.g. :class:`~pystac.Item`, :class:`~pystac.Collection`).
+    :class:`~pystac.Item` or :class:`~pystac.Asset` with properties from the
+    :stac-ext:`Electro-Optical Extension <eo>`. This class is generic over the type of
+    STAC Object to be extended (e.g. :class:`~pystac.Item`,
+    :class:`~pystac.Asset`).
 
-    This class will generally not be used directly. Instead, use the concrete
-    implementation associated with the STAC Object you want to extend (e.g.
-    :class:`~ItemEOExtension` to extend an :class:`~pystac.Item`).
+    To create a concrete instance of :class:`EOExtension`, use the
+    :meth:`EOExtension.ext` method. For example:
+
+    .. code-block:: python
+
+       >>> item: pystac.Item = ...
+       >>> eo_ext = EOExtension.ext(item)
     """
 
     def apply(
         self, bands: Optional[List[Band]] = None, cloud_cover: Optional[float] = None
     ) -> None:
-        """Applies label extension properties to the extended Item.
+        """Applies label extension properties to the extended :class:`~pystac.Item` or
+        :class:`~pystac.Asset`.
 
         Args:
             bands : A list of available bands where each item is a :class:`~Band`
@@ -314,8 +348,8 @@ class EOExtension(
     def get_schema_uri(cls) -> str:
         return SCHEMA_URI
 
-    @staticmethod
-    def ext(obj: T) -> "EOExtension[T]":
+    @classmethod
+    def ext(cls, obj: T, add_if_missing: bool = False) -> "EOExtension[T]":
         """Extends the given STAC Object with properties from the :stac-ext:`Electro-Optical
         Extension <eo>`.
 
@@ -327,17 +361,22 @@ class EOExtension(
             pystac.ExtensionTypeError : If an invalid object type is passed.
         """
         if isinstance(obj, pystac.Item):
+            cls.validate_has_extension(obj, add_if_missing)
             return cast(EOExtension[T], ItemEOExtension(obj))
         elif isinstance(obj, pystac.Asset):
+            cls.validate_owner_has_extension(obj, add_if_missing)
             return cast(EOExtension[T], AssetEOExtension(obj))
         else:
             raise pystac.ExtensionTypeError(
-                f"EO extension does not apply to type {type(obj)}"
+                f"EO extension does not apply to type '{type(obj).__name__}'"
             )
 
-    @staticmethod
-    def summaries(obj: pystac.Collection) -> "SummariesEOExtension":
+    @classmethod
+    def summaries(
+        cls, obj: pystac.Collection, add_if_missing: bool = False
+    ) -> "SummariesEOExtension":
         """Returns the extended summaries object for the given collection."""
+        cls.validate_has_extension(obj, add_if_missing)
         return SummariesEOExtension(obj)
 
 
@@ -370,9 +409,9 @@ class ItemEOExtension(EOExtension[pystac.Item]):
         if bands is None:
             asset_bands: List[Dict[str, Any]] = []
             for _, value in self.item.get_assets().items():
-                if BANDS_PROP in value.properties:
+                if BANDS_PROP in value.extra_fields:
                     asset_bands.extend(
-                        cast(List[Dict[str, Any]], value.properties.get(BANDS_PROP))
+                        cast(List[Dict[str, Any]], value.extra_fields.get(BANDS_PROP))
                     )
             if any(asset_bands):
                 bands = asset_bands
@@ -404,9 +443,19 @@ class AssetEOExtension(EOExtension[pystac.Asset]):
     """If present, this will be a list containing 1 dictionary representing the
     properties of the owning :class:`~pystac.Item`."""
 
+    def _get_bands(self) -> Optional[List[Band]]:
+        if BANDS_PROP not in self.properties:
+            return None
+        return list(
+            map(
+                lambda band: Band(band),
+                cast(List[Dict[str, Any]], self.properties.get(BANDS_PROP)),
+            )
+        )
+
     def __init__(self, asset: pystac.Asset):
         self.asset_href = asset.href
-        self.properties = asset.properties
+        self.properties = asset.extra_fields
         if asset.owner and isinstance(asset.owner, pystac.Item):
             self.additional_read_properties = [asset.owner.properties]
 
@@ -422,13 +471,13 @@ class SummariesEOExtension(SummariesExtension):
 
     @property
     def bands(self) -> Optional[List[Band]]:
-        """Get or sets a list of :class:`~pystac.Band` objects that represent
-        the available bands.
+        """Get or sets the summary of :attr:`EOExtension.bands` values
+        for this Collection.
         """
 
         return map_opt(
             lambda bands: [Band(b) for b in bands],
-            self.summaries.get_list(BANDS_PROP, Dict[str, Any]),
+            self.summaries.get_list(BANDS_PROP),
         )
 
     @bands.setter
@@ -437,8 +486,10 @@ class SummariesEOExtension(SummariesExtension):
 
     @property
     def cloud_cover(self) -> Optional[RangeSummary[float]]:
-        """Get or sets the range of cloud cover from the summary."""
-        return self.summaries.get_range(CLOUD_COVER_PROP, float)
+        """Get or sets the summary of :attr:`EOExtension.cloud_cover` values
+        for this Collection.
+        """
+        return self.summaries.get_range(CLOUD_COVER_PROP)
 
     @cloud_cover.setter
     def cloud_cover(self, v: Optional[RangeSummary[float]]) -> None:
@@ -447,42 +498,12 @@ class SummariesEOExtension(SummariesExtension):
 
 class EOExtensionHooks(ExtensionHooks):
     schema_uri: str = SCHEMA_URI
-    prev_extension_ids: Set[str] = set(["eo"])
-    stac_object_types: Set[pystac.STACObjectType] = set([pystac.STACObjectType.ITEM])
+    prev_extension_ids = {"eo"}
+    stac_object_types = {pystac.STACObjectType.ITEM}
 
     def migrate(
         self, obj: Dict[str, Any], version: STACVersionID, info: STACJSONDescription
     ) -> None:
-        if version < "0.5":
-            if "eo:crs" in obj["properties"]:
-                # Try to pull out the EPSG code.
-                # Otherwise, just leave it alone.
-                wkt = obj["properties"]["eo:crs"]
-                matches = list(re.finditer(r'AUTHORITY\[[^\]]*\"(\d+)"\]', wkt))
-                if len(matches) > 0:
-                    epsg_code = matches[-1].group(1)
-                    obj["properties"].pop("eo:crs")
-                    obj["properties"]["eo:epsg"] = int(epsg_code)
-
-        if version < "0.6":
-            # Change eo:bands from a dict to a list. eo:bands on an asset
-            # is an index instead of a dict key. eo:bands is in properties.
-            bands_dict = obj["eo:bands"]
-            keys_to_indices: Dict[str, int] = {}
-            bands: List[Dict[str, Any]] = []
-            for i, (k, band) in enumerate(bands_dict.items()):
-                keys_to_indices[k] = i
-                bands.append(band)
-
-            obj.pop("eo:bands")
-            obj["properties"]["eo:bands"] = bands
-            for k, asset in obj["assets"].items():
-                if "eo:bands" in asset:
-                    asset_band_indices: List[int] = []
-                    for bk in asset["eo:bands"]:
-                        asset_band_indices.append(keys_to_indices[bk])
-                    asset["eo:bands"] = sorted(asset_band_indices)
-
         if version < "0.9":
             # Some eo fields became common_metadata
             if (
@@ -528,6 +549,22 @@ class EOExtensionHooks(ExtensionHooks):
                             "eo:{}".format(field)
                         ]
                         del obj["properties"]["eo:{}".format(field)]
+
+            # eo:epsg became proj:epsg
+            eo_epsg = PREFIX + "epsg"
+            proj_epsg = projection.PREFIX + "epsg"
+            if eo_epsg in obj["properties"] and proj_epsg not in obj["properties"]:
+                obj["properties"][proj_epsg] = obj["properties"].pop(eo_epsg)
+                obj["stac_extensions"] = obj.get("stac_extensions", [])
+                if (
+                    projection.ProjectionExtension.get_schema_uri()
+                    not in obj["stac_extensions"]
+                ):
+                    obj["stac_extensions"].append(
+                        projection.ProjectionExtension.get_schema_uri()
+                    )
+                if not any(prop.startswith(PREFIX) for prop in obj["properties"]):
+                    obj["stac_extensions"].remove(EOExtension.get_schema_uri())
 
         if version < "1.0.0-beta.1" and info.object_type == pystac.STACObjectType.ITEM:
             # gsd moved from eo to common metadata

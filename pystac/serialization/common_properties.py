@@ -29,17 +29,13 @@ def merge_common_properties(
     properties_merged = False
 
     collection: Optional[Union[pystac.Collection, Dict[str, Any]]] = None
-    collection_id: Optional[str] = None
     collection_href: Optional[str] = None
 
     stac_version = item_dict.get("stac_version")
 
     # The commons extension was removed in 1.0.0-beta.1, so if this is an earlier STAC
     # item we don't have to bother with merging.
-    if (
-        stac_version is not None
-        and STACVersionID(stac_version) > "0.9.0"  # type:ignore
-    ):
+    if stac_version is not None and STACVersionID(stac_version) > "0.9.0":
         return False
 
     # Check to see if this is a 0.9.0 item that
@@ -71,7 +67,7 @@ def merge_common_properties(
             (link for link in links if link["rel"] == pystac.RelType.COLLECTION), None
         )
         if collection_link is not None:
-            collection_href = cast(Dict[str, Any], collection_link).get("href")
+            collection_href = collection_link.get("href")
             if collection_href is not None:
                 if json_href is not None:
                     collection_href = make_absolute_href(collection_href, json_href)
@@ -82,7 +78,6 @@ def merge_common_properties(
                     collection = pystac.StacIO.default().read_json(collection_href)
 
     if collection is not None:
-        collection_id = None
         collection_props: Optional[Dict[str, Any]] = None
         if isinstance(collection, pystac.Collection):
             collection_id = collection.id

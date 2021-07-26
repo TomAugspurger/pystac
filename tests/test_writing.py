@@ -1,10 +1,10 @@
 import unittest
-from tempfile import TemporaryDirectory
+import tempfile
 from typing import Any, List
 
 import pystac
 from pystac import Collection, CatalogType, HIERARCHICAL_LINKS
-from pystac.utils import is_absolute_href, make_absolute_href, make_relative_href
+from pystac.utils import is_absolute_href, make_absolute_href
 from pystac.validation import validate_dict
 
 from tests.utils import TestCases
@@ -35,18 +35,6 @@ class STACWritingTest(unittest.TestCase):
     def validate_link_types(
         self, root_href: str, catalog_type: pystac.CatalogType
     ) -> None:
-        def validate_asset_href_type(item: pystac.Item, item_href: str) -> None:
-            for asset in item.assets.values():
-                if not is_absolute_href(asset.href):
-                    is_valid = not is_absolute_href(asset.href)
-                    if not is_valid:
-                        # If the item href and asset href don't share
-                        # the same root, the asset href must be absolute
-                        rel_href = make_relative_href(asset.href, item_href)
-                        self.assertEqual(asset.href, rel_href)
-                    else:
-                        self.assertTrue(is_valid)
-
         def validate_item_link_type(
             href: str, link_type: str, should_include_self: bool
         ) -> None:
@@ -63,8 +51,6 @@ class STACWritingTest(unittest.TestCase):
                     else:
                         self.assertTrue(is_absolute_href(link.href))
 
-            validate_asset_href_type(item, href)
-
             rels = set([link["rel"] for link in item_dict["links"]])
             self.assertEqual("self" in rels, should_include_self)
 
@@ -72,7 +58,8 @@ class STACWritingTest(unittest.TestCase):
             href: str, link_type: str, should_include_self: bool
         ) -> None:
             cat_dict = pystac.StacIO.default().read_json(href)
-            cat = pystac.Catalog.from_file(href)
+            cat = pystac.read_file(href)
+            assert isinstance(cat, pystac.Catalog)
 
             rels = set([link["rel"] for link in cat_dict["links"]])
             self.assertEqual("self" in rels, should_include_self)
@@ -105,7 +92,7 @@ class STACWritingTest(unittest.TestCase):
     def do_test(
         self, catalog: pystac.Catalog, catalog_type: pystac.CatalogType
     ) -> None:
-        with TemporaryDirectory() as tmp_dir:
+        with tempfile.TemporaryDirectory() as tmp_dir:
             catalog.normalize_hrefs(tmp_dir)
             self.validate_catalog(catalog)
 

@@ -1,7 +1,18 @@
 from abc import ABC, abstractmethod
-from typing import Generic, Iterable, List, Optional, Dict, Any, Type, TypeVar, Union
+from typing import (
+    cast,
+    Generic,
+    Iterable,
+    List,
+    Optional,
+    Dict,
+    Any,
+    Type,
+    TypeVar,
+    Union,
+)
 
-from pystac import Collection, RangeSummary, STACObject, Summaries
+import pystac
 
 
 class SummariesExtension:
@@ -12,16 +23,16 @@ class SummariesExtension:
     extension-specific class that inherits from this class and instantiate that. See
     :class:`~pystac.extensions.eo.SummariesEOExtension` for an example."""
 
-    summaries: Summaries
+    summaries: pystac.Summaries
     """The summaries for the :class:`~pystac.Collection` being extended."""
 
-    def __init__(self, collection: Collection) -> None:
+    def __init__(self, collection: pystac.Collection) -> None:
         self.summaries = collection.summaries
 
     def _set_summary(
         self,
         prop_key: str,
-        v: Optional[Union[List[Any], RangeSummary[Any], Dict[str, Any]]],
+        v: Optional[Union[List[Any], pystac.RangeSummary[Any], Dict[str, Any]]],
     ) -> None:
         if v is None:
             self.summaries.remove(prop_key)
@@ -57,15 +68,15 @@ class PropertiesExtension(ABC):
     ``additional_read_properties`` will take precedence.
     """
 
-    def _get_property(self, prop_name: str, typ: Type[P]) -> Optional[P]:
-        result = self.properties.get(prop_name)
-        if result is not None:
-            return result
+    def _get_property(self, prop_name: str, _typ: Type[P]) -> Optional[P]:
+        maybe_property: Optional[P] = self.properties.get(prop_name)
+        if maybe_property is not None:
+            return maybe_property
         if self.additional_read_properties is not None:
             for props in self.additional_read_properties:
-                result = props.get(prop_name)
-                if result is not None:
-                    return result
+                maybe_additional_property: Optional[P] = props.get(prop_name)
+                if maybe_additional_property is not None:
+                    return maybe_additional_property
         return None
 
     def _set_property(
@@ -77,7 +88,7 @@ class PropertiesExtension(ABC):
             self.properties[prop_name] = v
 
 
-S = TypeVar("S", bound=STACObject)
+S = TypeVar("S", bound=pystac.STACObject)
 
 
 class ExtensionManagementMixin(Generic[S], ABC):
@@ -95,15 +106,16 @@ class ExtensionManagementMixin(Generic[S], ABC):
     @abstractmethod
     def get_schema_uri(cls) -> str:
         """Gets the schema URI associated with this extension."""
-        pass
+        raise NotImplementedError
 
     @classmethod
     def add_to(cls, obj: S) -> None:
         """Add the schema URI for this extension to the
-        :attr:`pystac.STACObject.stac_extensions` list for the given object."""
+        :attr:`~pystac.STACObject.stac_extensions` list for the given object, if it is
+        not already present."""
         if obj.stac_extensions is None:
             obj.stac_extensions = [cls.get_schema_uri()]
-        else:
+        elif cls.get_schema_uri() not in obj.stac_extensions:
             obj.stac_extensions.append(cls.get_schema_uri())
 
     @classmethod
@@ -123,3 +135,43 @@ class ExtensionManagementMixin(Generic[S], ABC):
             obj.stac_extensions is not None
             and cls.get_schema_uri() in obj.stac_extensions
         )
+
+    @classmethod
+    def validate_owner_has_extension(
+        cls, asset: pystac.Asset, add_if_missing: bool
+    ) -> None:
+        """Given an :class:`~pystac.Asset`, checks if the asset's owner has this
+        extension's schema URI in its :attr:`~pystac.STACObject.stac_extensions` list.
+        If ``add_if_missing`` is ``True``, the schema URI will be added to the owner.
+
+        Raises:
+            STACError : If ``add_if_missing`` is ``True`` and ``asset.owner`` is
+                ``None``.
+        """
+        if asset.owner is None:
+            if add_if_missing:
+                raise pystac.STACError(
+                    "Can only add schema URIs to Assets with an owner."
+                )
+            else:
+                return
+        return cls.validate_has_extension(cast(S, asset.owner), add_if_missing)
+
+    @classmethod
+    def validate_has_extension(cls, obj: S, add_if_missing: bool) -> None:
+        """Given a :class:`~pystac.STACObject`, checks if the object has this
+        extension's schema URI in its :attr:`~pystac.STACObject.stac_extensions` list.
+        If ``add_if_missing`` is ``True``, the schema URI will be added to the object.
+
+        Args:
+            obj : The object to validate.
+            add_if_missing : Whether to add the schema URI to the object if it is
+                not already present.
+        """
+        if add_if_missing:
+            cls.add_to(obj)
+
+        if cls.get_schema_uri() not in obj.stac_extensions:
+            raise pystac.ExtensionNotImplemented(
+                f"Could not find extension schema URI {cls.get_schema_uri()} in object."
+            )

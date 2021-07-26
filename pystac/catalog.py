@@ -1,6 +1,7 @@
 import os
 from copy import deepcopy
 from enum import Enum
+from pystac.errors import STACTypeError
 from typing import (
     Any,
     Callable,
@@ -15,7 +16,7 @@ from typing import (
 )
 
 import pystac
-from pystac.stac_object import STACObject
+from pystac.stac_object import STACObject, STACObjectType
 from pystac.layout import (
     BestPracticesLayoutStrategy,
     HrefLayoutStrategy,
@@ -23,7 +24,12 @@ from pystac.layout import (
 )
 from pystac.link import Link
 from pystac.cache import ResolvedObjectCache
-from pystac.utils import is_absolute_href, make_absolute_href
+from pystac.serialization import (
+    identify_stac_object_type,
+    identify_stac_object,
+    migrate_to_latest,
+)
+from pystac.utils import is_absolute_href, make_absolute_href, make_relative_href
 
 if TYPE_CHECKING:
     from pystac.item import Asset as Asset_Type, Item as Item_Type
@@ -31,17 +37,15 @@ if TYPE_CHECKING:
 
 
 class CatalogType(str, Enum):
-    def __str__(self) -> str:
-        return str(self.value)
-
     SELF_CONTAINED = "SELF_CONTAINED"
     """A 'self-contained catalog' is one that is designed for portability.
     Users may want to download an online catalog from and be able to use it on their
     local computer, so all links need to be relative.
 
     See:
-        `The best practices documentation on self-contained catalogs <https://github.com/radiantearth/stac-spec/blob/v0.8.1/best-practices.md#self-contained-catalogs>`_
-    """  # noqa E501
+        :stac-spec:`The best practices documentation on self-contained catalogs
+            <best-practices.md#self-contained-catalogs>`
+    """
 
     ABSOLUTE_PUBLISHED = "ABSOLUTE_PUBLISHED"
     """
@@ -49,17 +53,19 @@ class CatalogType(str, Enum):
     both in the links objects and in the asset hrefs.
 
     See:
-        `The best practices documentation on published catalogs <https://github.com/radiantearth/stac-spec/blob/v0.8.1/best-practices.md#published-catalogs>`_
-    """  # noqa E501
+        :stac-spec:`The best practices documentation on published catalogs
+            <best-practices.md#published-catalogs>`
+    """
 
     RELATIVE_PUBLISHED = "RELATIVE_PUBLISHED"
     """
-    Relative Published Catalog is a catalog that uses relative links for everything,
-    but includes an absolute self link at the root catalog, to identify its online location.
+    Relative Published Catalog is a catalog that uses relative links for everything, but
+    includes an absolute self link at the root catalog, to identify its online location.
 
     See:
-        `The best practices documentation on published catalogs <https://github.com/radiantearth/stac-spec/blob/v0.8.1/best-practices.md#published-catalogs>`_
-    """  # noqa E501
+        :stac-spec:`The best practices documentation on published catalogs
+            <best-practices.md#published-catalogs>`
+    """
 
     @classmethod
     def determine_type(cls, stac_json: Dict[str, Any]) -> Optional["CatalogType"]:
@@ -104,8 +110,8 @@ class Catalog(STACObject):
     Args:
         id : Identifier for the catalog. Must be unique within the STAC.
         description : Detailed multi-line description to fully explain the catalog.
-            `CommonMark 0.28 syntax <http://commonmark.org/>`_ MAY be used for rich text
-            representation.
+            `CommonMark 0.28 syntax <https://commonmark.org/>`_ MAY be used for rich
+            text representation.
         title : Optional short descriptive one-line title for the catalog.
         stac_extensions : Optional list of extensions the Catalog implements.
         href : Optional HREF for this catalog, which be set as the
@@ -314,6 +320,21 @@ class Catalog(STACObject):
             self.get_stac_objects(pystac.RelType.CHILD),
         )
 
+    def get_collections(self) -> Iterable["Collection_Type"]:
+        """Return all children of this catalog that are :class:`~pystac.Collection`
+        instances."""
+        return map(
+            lambda x: cast(pystac.Collection, x),
+            self.get_stac_objects(pystac.RelType.CHILD, pystac.Collection),
+        )
+
+    def get_all_collections(self) -> Iterable["Collection_Type"]:
+        """Get all collections from this catalog and all subcatalogs. Will traverse
+        any subcatalogs recursively."""
+        yield from self.get_collections()
+        for child in self.get_children():
+            yield from child.get_collections()
+
     def get_child_links(self) -> List[Link]:
         """Return all child links of this catalog.
 
@@ -465,7 +486,8 @@ class Catalog(STACObject):
         return d
 
     def clone(self) -> "Catalog":
-        clone = Catalog(
+        cls = self.__class__
+        clone = cls(
             id=self.id,
             description=self.description,
             title=self.title,
@@ -542,11 +564,13 @@ class Catalog(STACObject):
         Args:
             root_href : The absolute HREF that all links will be normalized against.
             strategy : The layout strategy to use in setting the HREFS
-                for this catalog. Defaults to :class:`~pystac.layout.BestPracticesLayoutStrategy`
+                for this catalog. Defaults to
+                :class:`~pystac.layout.BestPracticesLayoutStrategy`
 
         See:
-            `STAC best practices document <https://github.com/radiantearth/stac-spec/blob/v0.8.1/best-practices.md#catalog-layout>`_ for the canonical layout of a STAC.
-        """  # noqa E501
+            :stac-spec:`STAC best practices document <best-practices.md#catalog-layout>`
+            for the canonical layout of a STAC.
+        """
         if strategy is None:
             _strategy: HrefLayoutStrategy = BestPracticesLayoutStrategy()
         else:
@@ -602,7 +626,6 @@ class Catalog(STACObject):
         template: str,
         defaults: Optional[Dict[str, Any]] = None,
         parent_ids: Optional[List[str]] = None,
-        **kwargs: Any,
     ) -> List["Catalog"]:
         """Walks through the catalog and generates subcatalogs
         for items based on the template string.
@@ -682,16 +705,22 @@ class Catalog(STACObject):
 
         return result
 
-    def save(self, catalog_type: Optional[CatalogType] = None) -> None:
+    def save(
+        self,
+        catalog_type: Optional[CatalogType] = None,
+        dest_href: Optional[str] = None,
+    ) -> None:
         """Save this catalog and all it's children/item to files determined by the object's
-        self link HREF.
+        self link HREF or a specified path.
 
         Args:
             catalog_type : The catalog type that dictates the structure of
                 the catalog to save. Use a member of :class:`~pystac.CatalogType`.
                 If not supplied, the catalog_type of this catalog will be used.
                 If that attribute is not set, an exception will be raised.
-
+            dest_href : The location where the catalog is to be saved.
+                If not supplied, the catalog's self link HREF is used to determine
+                the location of the catalog file and children's files.
         Note:
             If the catalog type is ``CatalogType.ABSOLUTE_PUBLISHED``,
             all self links will be included, and hierarchical links be absolute URLs.
@@ -701,6 +730,7 @@ class Catalog(STACObject):
             If the catalog  type is ``CatalogType.SELF_CONTAINED``, no self links will
             be included and hierarchical links will be relative URLs.
         """
+
         root = self.get_root()
         if root is None:
             raise Exception("There is no root catalog")
@@ -712,13 +742,27 @@ class Catalog(STACObject):
 
         for child_link in self.get_child_links():
             if child_link.is_resolved():
-                cast(Catalog, child_link.target).save()
+                child = cast(Catalog, child_link.target)
+                if dest_href is not None:
+                    rel_href = make_relative_href(child.self_href, self.self_href)
+                    child_dest_href = make_absolute_href(
+                        rel_href, dest_href, start_is_dir=True
+                    )
+                    child.save(dest_href=child_dest_href)
+                else:
+                    child.save()
 
         for item_link in self.get_item_links():
             if item_link.is_resolved():
-                cast(pystac.Item, item_link.target).save_object(
-                    include_self_link=items_include_self_link
-                )
+                item = cast(pystac.Item, item_link.target)
+                if dest_href is not None:
+                    rel_href = make_relative_href(item.self_href, self.self_href)
+                    item_dest_href = make_absolute_href(
+                        rel_href, dest_href, start_is_dir=True
+                    )
+                    item.save_object(include_self_link=True, dest_href=item_dest_href)
+                else:
+                    item.save_object(include_self_link=items_include_self_link)
 
         include_self_link = False
         # include a self link if this is the root catalog
@@ -730,7 +774,15 @@ class Catalog(STACObject):
             if root_link and root_link.get_absolute_href() == self.get_self_href():
                 include_self_link = True
 
-        self.save_object(include_self_link=include_self_link)
+        catalog_dest_href = None
+        if dest_href is not None:
+            rel_href = make_relative_href(self.self_href, self.self_href)
+            catalog_dest_href = make_absolute_href(
+                rel_href, dest_href, start_is_dir=True
+            )
+        self.save_object(
+            include_self_link=include_self_link, dest_href=catalog_dest_href
+        )
         if catalog_type is not None:
             self.catalog_type = catalog_type
 
@@ -754,7 +806,7 @@ class Catalog(STACObject):
         children = self.get_children()
         items = self.get_items()
 
-        yield (self, children, items)
+        yield self, children, items
         for child in self.get_children():
             yield from child.walk()
 
@@ -798,7 +850,7 @@ class Catalog(STACObject):
             to the item_mapper function.
         """
 
-        new_cat = cast(Catalog, self.full_copy())
+        new_cat = self.full_copy()
 
         def process_catalog(catalog: Catalog) -> None:
             for child in catalog.get_children():
@@ -900,16 +952,19 @@ class Catalog(STACObject):
         href: Optional[str] = None,
         root: Optional["Catalog"] = None,
         migrate: bool = False,
+        preserve_dict: bool = True,
     ) -> "Catalog":
         if migrate:
-            result = pystac.read_dict(d, href=href, root=root)
-            if not isinstance(result, Catalog):
-                raise pystac.STACError(f"{result} is not a Catalog")
-            return result
+            info = identify_stac_object(d)
+            d = migrate_to_latest(d, info)
+
+        if not cls.matches_object_type(d):
+            raise STACTypeError(f"{d} does not represent a {cls.__name__} instance")
 
         catalog_type = CatalogType.determine_type(d)
 
-        d = deepcopy(d)
+        if preserve_dict:
+            d = deepcopy(d)
 
         id = d.pop("id")
         description = d.pop("description")
@@ -919,7 +974,7 @@ class Catalog(STACObject):
 
         d.pop("stac_version")
 
-        cat = Catalog(
+        cat = cls(
             id=id,
             description=description,
             title=title,
@@ -937,6 +992,9 @@ class Catalog(STACObject):
             if link["rel"] != pystac.RelType.SELF or href is None:
                 cat.add_link(Link.from_dict(link))
 
+        if root:
+            cat.set_root(root)
+
         return cat
 
     def full_copy(
@@ -946,7 +1004,16 @@ class Catalog(STACObject):
 
     @classmethod
     def from_file(cls, href: str, stac_io: Optional[pystac.StacIO] = None) -> "Catalog":
+        if stac_io is None:
+            stac_io = pystac.StacIO.default()
+
         result = super().from_file(href, stac_io)
         if not isinstance(result, Catalog):
             raise pystac.STACTypeError(f"{result} is not a {Catalog}.")
+        result._stac_io = stac_io
+
         return result
+
+    @classmethod
+    def matches_object_type(cls, d: Dict[str, Any]) -> bool:
+        return identify_stac_object_type(d) == STACObjectType.CATALOG

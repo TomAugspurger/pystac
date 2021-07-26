@@ -4,9 +4,10 @@ import unittest
 from copy import deepcopy
 
 import pystac
+from pystac import ExtensionTypeError
 from pystac.extensions.projection import ProjectionExtension
 from pystac.utils import get_opt
-from tests.utils import TestCases, test_to_from_dict
+from tests.utils import TestCases, assert_to_from_dict
 
 WKT2 = """
 GEOGCS["WGS 84",
@@ -80,7 +81,7 @@ class ProjectionTest(unittest.TestCase):
     def test_to_from_dict(self) -> None:
         with open(self.example_uri) as f:
             d = json.load(f)
-        test_to_from_dict(self, pystac.Item, d)
+        assert_to_from_dict(self, pystac.Item, d)
 
     def test_apply(self) -> None:
         item = next(iter(TestCases.test_case_2().get_all_items()))
@@ -220,6 +221,28 @@ class ProjectionTest(unittest.TestCase):
         with self.assertRaises(pystac.STACValidationError):
             ProjectionExtension.ext(proj_item).projjson = {"bad": "data"}
             proj_item.validate()
+
+    def test_crs_string(self) -> None:
+        item = pystac.Item.from_file(self.example_uri)
+        ProjectionExtension.remove_from(item)
+        for key in list(item.properties.keys()):
+            if key.startswith("proj:"):
+                item.properties.pop(key)
+        self.assertIsNone(item.properties.get("proj:epsg"))
+        self.assertIsNone(item.properties.get("proj:wkt2"))
+        self.assertIsNone(item.properties.get("proj:projjson"))
+
+        projection = ProjectionExtension.ext(item, add_if_missing=True)
+        self.assertIsNone(projection.crs_string)
+
+        projection.projjson = PROJJSON
+        self.assertEqual(projection.crs_string, json.dumps(PROJJSON))
+
+        projection.wkt2 = WKT2
+        self.assertEqual(projection.crs_string, WKT2)
+
+        projection.epsg = 4326
+        self.assertEqual(projection.crs_string, "EPSG:4326")
 
     def test_geometry(self) -> None:
         proj_item = pystac.Item.from_file(self.example_uri)
@@ -405,3 +428,97 @@ class ProjectionTest(unittest.TestCase):
 
         # Validate
         proj_item.validate()
+
+    def test_extension_not_implemented(self) -> None:
+        # Should raise exception if Item does not include extension URI
+        item = pystac.Item.from_file(self.example_uri)
+        item.stac_extensions.remove(ProjectionExtension.get_schema_uri())
+
+        with self.assertRaises(pystac.ExtensionNotImplemented):
+            _ = ProjectionExtension.ext(item)
+
+        # Should raise exception if owning Item does not include extension URI
+        asset = item.assets["B8"]
+
+        with self.assertRaises(pystac.ExtensionNotImplemented):
+            _ = ProjectionExtension.ext(asset)
+
+        # Should succeed if Asset has no owner
+        ownerless_asset = pystac.Asset.from_dict(asset.to_dict())
+        _ = ProjectionExtension.ext(ownerless_asset)
+
+    def test_item_ext_add_to(self) -> None:
+        item = pystac.Item.from_file(self.example_uri)
+        item.stac_extensions.remove(ProjectionExtension.get_schema_uri())
+        self.assertNotIn(ProjectionExtension.get_schema_uri(), item.stac_extensions)
+
+        _ = ProjectionExtension.ext(item, add_if_missing=True)
+
+        self.assertIn(ProjectionExtension.get_schema_uri(), item.stac_extensions)
+
+    def test_asset_ext_add_to(self) -> None:
+        item = pystac.Item.from_file(self.example_uri)
+        item.stac_extensions.remove(ProjectionExtension.get_schema_uri())
+        self.assertNotIn(ProjectionExtension.get_schema_uri(), item.stac_extensions)
+        asset = item.assets["B8"]
+
+        _ = ProjectionExtension.ext(asset, add_if_missing=True)
+
+        self.assertIn(ProjectionExtension.get_schema_uri(), item.stac_extensions)
+
+    def test_should_raise_exception_when_passing_invalid_extension_object(
+        self,
+    ) -> None:
+        self.assertRaisesRegex(
+            ExtensionTypeError,
+            r"^Projection extension does not apply to type 'object'$",
+            ProjectionExtension.ext,
+            object(),
+        )
+
+
+class ProjectionSummariesTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.maxDiff = None
+        self.example_uri = TestCases.get_path(
+            "data-files/projection/collection-with-summaries.json"
+        )
+
+    def test_get_summaries(self) -> None:
+        col = pystac.Collection.from_file(self.example_uri)
+        proj_summaries = ProjectionExtension.summaries(col)
+
+        # Get
+
+        epsg_summaries = proj_summaries.epsg
+        assert epsg_summaries is not None
+        self.assertListEqual(epsg_summaries, [32614])
+
+    def test_set_summaries(self) -> None:
+        col = pystac.Collection.from_file(self.example_uri)
+        proj_summaries = ProjectionExtension.summaries(col)
+
+        # Set
+
+        proj_summaries.epsg = [4326]
+
+        col_dict = col.to_dict()
+        self.assertEqual(len(col_dict["summaries"]["proj:epsg"]), 1)
+        self.assertEqual(col_dict["summaries"]["proj:epsg"][0], 4326)
+
+    def test_summaries_adds_uri(self) -> None:
+        col = pystac.Collection.from_file(self.example_uri)
+        col.stac_extensions = []
+        self.assertRaisesRegex(
+            pystac.ExtensionNotImplemented,
+            r"Could not find extension schema URI.*",
+            ProjectionExtension.summaries,
+            col,
+            False,
+        )
+        _ = ProjectionExtension.summaries(col, True)
+
+        self.assertIn(ProjectionExtension.get_schema_uri(), col.stac_extensions)
+
+        ProjectionExtension.remove_from(col)
+        self.assertNotIn(ProjectionExtension.get_schema_uri(), col.stac_extensions)

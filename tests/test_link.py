@@ -1,5 +1,7 @@
 import datetime
+import os
 import unittest
+from tempfile import TemporaryDirectory
 from typing import Any, Dict, List
 
 import pystac
@@ -58,7 +60,7 @@ class LinkTest(unittest.TestCase):
         rel = "my rel"
         target = "../elsewhere"
         mime_type = "example/stac_thing"
-        link = pystac.Link(rel, target, mime_type, "a title", properties={"a": "b"})
+        link = pystac.Link(rel, target, mime_type, "a title", extra_fields={"a": "b"})
         expected_dict = {
             "rel": rel,
             "href": target,
@@ -82,6 +84,52 @@ class LinkTest(unittest.TestCase):
         link = pystac.Link("my rel", target=self.item)
         link.resolve_stac_object()
 
+    def test_resolved_self_href(self) -> None:
+        catalog = pystac.Catalog(id="test", description="test desc")
+        with TemporaryDirectory() as temporary_directory:
+            catalog.normalize_and_save(temporary_directory)
+            path = os.path.join(temporary_directory, "catalog.json")
+            catalog = pystac.Catalog.from_file(path)
+            link = catalog.get_single_link(pystac.RelType.SELF)
+            assert link
+            link.resolve_stac_object()
+            self.assertEqual(link.get_absolute_href(), path)
+
+    def test_target_getter_setter(self) -> None:
+        link = pystac.Link("my rel", target="./foo/bar.json")
+        self.assertEqual(link.target, "./foo/bar.json")
+        self.assertEqual(link.get_target_str(), "./foo/bar.json")
+
+        link.target = self.item
+        self.assertEqual(link.target, self.item)
+        self.assertEqual(link.get_target_str(), self.item.get_self_href())
+
+        link.target = "./bar/foo.json"
+        self.assertEqual(link.target, "./bar/foo.json")
+
+    def test_get_target_str_no_href(self) -> None:
+        self.item.remove_links("self")
+        link = pystac.Link("self", target=self.item)
+        self.item.add_link(link)
+        self.assertIsNone(link.get_target_str())
+
+    def test_relative_self_href(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            pystac.write_file(
+                self.item,
+                include_self_link=False,
+                dest_href=os.path.join(temporary_directory, "item.json"),
+            )
+            previous = os.getcwd()
+            try:
+                os.chdir(temporary_directory)
+                item = pystac.read_file("item.json")
+                href = item.get_self_href()
+                assert href
+                self.assertTrue(os.path.isabs(href), f"Not an absolute path: {href}")
+            finally:
+                os.chdir(previous)
+
 
 class StaticLinkTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -103,12 +151,13 @@ class StaticLinkTest(unittest.TestCase):
             {"rel": "r", "href": "t"},
             {"rel": "r", "href": "/t"},
             {"rel": "r", "href": "t", "type": "a/b", "title": "t", "c": "d", "1": 2},
-            # Special case.
-            {"rel": "self", "href": "t"},
         ]
         for d in test_cases:
             d2 = pystac.Link.from_dict(d).to_dict()
             self.assertEqual(d, d2)
+        d = {"rel": "self", "href": "t"}
+        d2 = {"rel": "self", "href": os.path.join(os.getcwd(), "t")}
+        self.assertEqual(pystac.Link.from_dict(d).to_dict(), d2)
 
     def test_from_dict_failures(self) -> None:
         dicts: List[Dict[str, Any]] = [{}, {"href": "t"}, {"rel": "r"}]
@@ -135,3 +184,50 @@ class StaticLinkTest(unittest.TestCase):
         link = pystac.Link.canonical(self.collection)
         expected = {"rel": "canonical", "href": None, "type": "application/json"}
         self.assertEqual(expected, link.to_dict())
+
+
+class LinkInheritanceTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.maxDiff = None
+        self.collection = pystac.Collection(
+            "collection id", "desc", extent=ARBITRARY_EXTENT
+        )
+        self.item = pystac.Item(
+            id="test-item",
+            geometry=None,
+            bbox=None,
+            datetime=TEST_DATETIME,
+            properties={},
+        )
+
+    class CustomLink(pystac.Link):
+        pass
+
+    def test_from_dict(self) -> None:
+        link = self.CustomLink.from_dict(
+            {"rel": "r", "href": "t", "type": "a/b", "title": "t", "c": "d", "1": 2}
+        )
+        self.assertIsInstance(link, self.CustomLink)
+
+    def test_collection(self) -> None:
+        link = self.CustomLink.collection(self.collection)
+        self.assertIsInstance(link, self.CustomLink)
+
+    def test_child(self) -> None:
+        link = self.CustomLink.child(self.collection)
+        self.assertIsInstance(link, self.CustomLink)
+
+    def test_canonical_item(self) -> None:
+        link = self.CustomLink.canonical(self.item)
+        self.assertIsInstance(link, self.CustomLink)
+
+    def test_canonical_collection(self) -> None:
+        link = self.CustomLink.canonical(self.collection)
+        self.assertIsInstance(link, self.CustomLink)
+
+    def test_clone(self) -> None:
+        link = self.CustomLink.from_dict(
+            {"rel": "r", "href": "t", "type": "a/b", "title": "t", "c": "d", "1": 2}
+        )
+        cloned_link = link.clone()
+        self.assertIsInstance(cloned_link, self.CustomLink)

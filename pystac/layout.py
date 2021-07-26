@@ -1,10 +1,10 @@
 from abc import abstractmethod, ABC
 from collections import OrderedDict
-import os
 from string import Formatter
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING, Union
 
 import pystac
+from pystac.utils import safe_urlparse, join_path_or_url, JoinType
 
 if TYPE_CHECKING:
     from pystac.stac_object import STACObject as STACObject_Type
@@ -74,7 +74,9 @@ class LayoutTemplate:
     # Special template vars specific to Items
     ITEM_TEMPLATE_VARS = ["date", "year", "month", "day", "collection"]
 
-    def __init__(self, template: str, defaults: Dict[str, str] = None) -> None:
+    def __init__(
+        self, template: str, defaults: Optional[Dict[str, str]] = None
+    ) -> None:
         self.template = template
         self.defaults = defaults or {}
 
@@ -247,17 +249,17 @@ class HrefLayoutStrategy(ABC):
     def get_catalog_href(
         self, cat: "Catalog_Type", parent_dir: str, is_root: bool
     ) -> str:
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def get_collection_href(
         self, col: "Collection_Type", parent_dir: str, is_root: bool
     ) -> str:
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def get_item_href(self, item: "Item_Type", parent_dir: str) -> str:
-        pass
+        raise NotImplementedError
 
 
 class CustomLayoutStrategy(HrefLayoutStrategy):
@@ -372,42 +374,57 @@ class TemplateLayoutStrategy(HrefLayoutStrategy):
     def get_catalog_href(
         self, cat: "Catalog_Type", parent_dir: str, is_root: bool
     ) -> str:
+        parsed_parent_dir = safe_urlparse(parent_dir)
+        join_type = JoinType.from_parsed_uri(parsed_parent_dir)
+
         if is_root or self.catalog_template is None:
             return self.fallback_strategy.get_catalog_href(cat, parent_dir, is_root)
         else:
             template_path = self.catalog_template.substitute(cat)
             if not template_path.endswith(".json"):
-                template_path = os.path.join(template_path, cat.DEFAULT_FILE_NAME)
+                template_path = join_path_or_url(
+                    join_type, template_path, cat.DEFAULT_FILE_NAME
+                )
 
-            return os.path.join(parent_dir, template_path)
+            return join_path_or_url(join_type, parent_dir, template_path)
 
     def get_collection_href(
         self, col: "Collection_Type", parent_dir: str, is_root: bool
     ) -> str:
+        parsed_parent_dir = safe_urlparse(parent_dir)
+        join_type = JoinType.from_parsed_uri(parsed_parent_dir)
+
         if is_root or self.collection_template is None:
             return self.fallback_strategy.get_collection_href(col, parent_dir, is_root)
         else:
             template_path = self.collection_template.substitute(col)
             if not template_path.endswith(".json"):
-                template_path = os.path.join(template_path, col.DEFAULT_FILE_NAME)
+                template_path = join_path_or_url(
+                    join_type, template_path, col.DEFAULT_FILE_NAME
+                )
 
-            return os.path.join(parent_dir, template_path)
+            return join_path_or_url(join_type, parent_dir, template_path)
 
     def get_item_href(self, item: "Item_Type", parent_dir: str) -> str:
+        parsed_parent_dir = safe_urlparse(parent_dir)
+        join_type = JoinType.from_parsed_uri(parsed_parent_dir)
+
         if self.item_template is None:
             return self.fallback_strategy.get_item_href(item, parent_dir)
         else:
             template_path = self.item_template.substitute(item)
             if not template_path.endswith(".json"):
-                template_path = os.path.join(template_path, "{}.json".format(item.id))
+                template_path = join_path_or_url(
+                    join_type, template_path, "{}.json".format(item.id)
+                )
 
-            return os.path.join(parent_dir, template_path)
+            return join_path_or_url(join_type, parent_dir, template_path)
 
 
 class BestPracticesLayoutStrategy(HrefLayoutStrategy):
     """Layout strategy that represents the catalog layout described
-    in the `STAC Best Practices documentation
-    <https://github.com/radiantearth/stac-spec/blob/v1.0.0-beta.2/best-practices.md>`_
+    in the :stac-spec:`STAC Best Practices documentation
+    <best-practices.md>`
 
     For a root catalog or collection, this will use the filename 'catalog.json'
     or 'collection.json' to the given directory. For a non-root catalog or collection,
@@ -422,24 +439,33 @@ class BestPracticesLayoutStrategy(HrefLayoutStrategy):
     def get_catalog_href(
         self, cat: "Catalog_Type", parent_dir: str, is_root: bool
     ) -> str:
+        parsed_parent_dir = safe_urlparse(parent_dir)
+        join_type = JoinType.from_parsed_uri(parsed_parent_dir)
+
         if is_root:
             cat_root = parent_dir
         else:
-            cat_root = os.path.join(parent_dir, "{}".format(cat.id))
+            cat_root = join_path_or_url(join_type, parent_dir, "{}".format(cat.id))
 
-        return os.path.join(cat_root, cat.DEFAULT_FILE_NAME)
+        return join_path_or_url(join_type, cat_root, cat.DEFAULT_FILE_NAME)
 
     def get_collection_href(
         self, col: "Collection_Type", parent_dir: str, is_root: bool
     ) -> str:
+        parsed_parent_dir = safe_urlparse(parent_dir)
+        join_type = JoinType.from_parsed_uri(parsed_parent_dir)
+
         if is_root:
             col_root = parent_dir
         else:
-            col_root = os.path.join(parent_dir, "{}".format(col.id))
+            col_root = join_path_or_url(join_type, parent_dir, "{}".format(col.id))
 
-        return os.path.join(col_root, col.DEFAULT_FILE_NAME)
+        return join_path_or_url(join_type, col_root, col.DEFAULT_FILE_NAME)
 
     def get_item_href(self, item: "Item_Type", parent_dir: str) -> str:
-        item_root = os.path.join(parent_dir, "{}".format(item.id))
+        parsed_parent_dir = safe_urlparse(parent_dir)
+        join_type = JoinType.from_parsed_uri(parsed_parent_dir)
 
-        return os.path.join(item_root, "{}.json".format(item.id))
+        item_root = join_path_or_url(join_type, parent_dir, "{}".format(item.id))
+
+        return join_path_or_url(join_type, item_root, "{}.json".format(item.id))

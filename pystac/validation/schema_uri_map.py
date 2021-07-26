@@ -28,7 +28,7 @@ class SchemaUriMap(ABC):
         Returns:
             str: The URI of the schema, or None if not found.
         """
-        pass
+        raise NotImplementedError
 
 
 class DefaultSchemaUriMap(SchemaUriMap):
@@ -45,11 +45,11 @@ class DefaultSchemaUriMap(SchemaUriMap):
     # the schema.
     BASE_URIS: List[Tuple[STACVersionRange, Callable[[str], str]]] = [
         (
-            STACVersionRange(min_version="1.0.0-beta.1"),
+            STACVersionRange(min_version="1.0.0-beta.2"),
             lambda version: "https://schemas.stacspec.org/v{}".format(version),
         ),
         (
-            STACVersionRange(min_version="0.8.0", max_version="0.9.0"),
+            STACVersionRange(min_version="0.8.0", max_version="1.0.0-beta.1"),
             lambda version: (
                 f"https://raw.githubusercontent.com/radiantearth/stac-spec/v{version}"
             ),
@@ -71,20 +71,12 @@ class DefaultSchemaUriMap(SchemaUriMap):
             None,
         ),
         STACObjectType.ITEM: ("item-spec/json-schema/item.json", None),
-        STACObjectType.ITEMCOLLECTION: (
-            None,
-            [
-                STACVersionRange(min_version="v0.8.0-rc1", max_version="0.9.0"),
-                "item-spec/json-schema/itemcollection.json",
-            ],
-        ),
     }
 
     @classmethod
     def _append_base_uri_if_needed(cls, uri: str, stac_version: str) -> Optional[str]:
         # Only append the base URI if it's not already an absolute URI
         if "://" not in uri:
-            base_uri = None
             for version_range, f in cls.BASE_URIS:
                 if version_range.contains(stac_version):
                     base_uri = f(stac_version)
@@ -98,12 +90,10 @@ class DefaultSchemaUriMap(SchemaUriMap):
     def get_object_schema_uri(
         self, object_type: STACObjectType, stac_version: str
     ) -> Optional[str]:
-        uri = None
         is_latest = stac_version == pystac.get_stac_version()
 
         if object_type not in self.DEFAULT_SCHEMA_MAP:
             raise KeyError("Unknown STAC object type {}".format(object_type))
-
         uri = self.DEFAULT_SCHEMA_MAP[object_type][0]
         if not is_latest:
             if self.DEFAULT_SCHEMA_MAP[object_type][1]:
@@ -134,11 +124,11 @@ class OldExtensionSchemaUriMap:
     ) -> List[Tuple[STACVersionRange, Callable[[STACVersionID], str]]]:
         return [
             (
-                STACVersionRange(min_version="1.0.0-beta.1"),
+                STACVersionRange(min_version="1.0.0-beta.2"),
                 lambda version: f"https://schemas.stacspec.org/v{version}",
             ),
             (
-                STACVersionRange(min_version="0.8.0", max_version="0.9.0"),
+                STACVersionRange(min_version="0.8.0", max_version="1.0.0-beta.1"),
                 lambda version: (
                     "https://raw.githubusercontent.com/"
                     f"radiantearth/stac-spec/v{version}"
@@ -323,7 +313,6 @@ class OldExtensionSchemaUriMap:
     ) -> Optional[str]:
         # Only append the base URI if it's not already an absolute URI
         if "://" not in uri:
-            base_uri = None
             for version_range, f in cls.get_base_uris():
                 if version_range.contains(stac_version):
                     base_uri = f(stac_version)

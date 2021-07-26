@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Optional, cast, TYPE_CHECKING, Union
+from typing import Any, Dict, Iterable, List, Optional, Type, cast, TYPE_CHECKING, Union
 
 import pystac
 from pystac import STACError
@@ -12,13 +12,9 @@ if TYPE_CHECKING:
 
 
 class STACObjectType(str, Enum):
-    def __str__(self) -> str:
-        return str(self.value)
-
-    CATALOG = "CATALOG"
-    COLLECTION = "COLLECTION"
-    ITEM = "ITEM"
-    ITEMCOLLECTION = "ITEMCOLLECTION"
+    CATALOG = "Catalog"
+    COLLECTION = "Collection"
+    ITEM = "Feature"
 
 
 class STACObject(ABC):
@@ -56,7 +52,7 @@ class STACObject(ABC):
         """
         import pystac.validation
 
-        return pystac.validation.validate(self)  # type:ignore
+        return pystac.validation.validate(self)
 
     def add_link(self, link: Link) -> None:
         """Add a link to this object's set of links.
@@ -64,7 +60,7 @@ class STACObject(ABC):
         Args:
              link : The link to add.
         """
-        link.set_owner(cast(STACObject, self))
+        link.set_owner(self)
         self.links.append(link)
 
     def add_links(self, links: List[Link]) -> None:
@@ -162,8 +158,8 @@ class STACObject(ABC):
             links have absolute (as opposed to relative) HREFs.
         """
         self_link = self.get_single_link(pystac.RelType.SELF)
-        if self_link:
-            return cast(str, self_link.target)
+        if self_link and self_link.has_target_href():
+            return self_link.get_target_str()
         else:
             return None
 
@@ -179,18 +175,14 @@ class STACObject(ABC):
         """
         root_link = self.get_root_link()
         if root_link is not None and root_link.is_resolved():
-            cast(pystac.Catalog, root_link.target)._resolved_objects.remove(
-                cast(STACObject, self)
-            )
+            cast(pystac.Catalog, root_link.target)._resolved_objects.remove(self)
 
         self.remove_links(pystac.RelType.SELF)
         if href is not None:
             self.add_link(Link.self_href(href))
 
         if root_link is not None and root_link.is_resolved():
-            cast(pystac.Catalog, root_link.target)._resolved_objects.cache(
-                cast(STACObject, self)
-            )
+            cast(pystac.Catalog, root_link.target)._resolved_objects.cache(self)
 
     def get_root(self) -> Optional["Catalog_Type"]:
         """Get the :class:`~pystac.Catalog` or :class:`~pystac.Collection` to
@@ -277,7 +269,7 @@ class STACObject(ABC):
             self.add_link(Link.parent(parent))
 
     def get_stac_objects(
-        self, rel: Union[str, pystac.RelType]
+        self, rel: Union[str, pystac.RelType], typ: Optional[Type["STACObject"]] = None
     ) -> Iterable["STACObject"]:
         """Gets the :class:`~pystac.STACObject` instances that are linked to
         by links with their ``rel`` property matching the passed in argument.
@@ -285,17 +277,21 @@ class STACObject(ABC):
         Args:
             rel : The relation to match each :class:`~pystac.Link`'s
                 ``rel`` property against.
+            typ : If not ``None``, objects will only be yielded if they are instances of
+                ``typ``.
 
         Returns:
             Iterable[STACObjects]: A possibly empty iterable of STACObjects that are
-            connected to this object through links with the given ``rel``.
+            connected to this object through links with the given ``rel`` and are of
+            type ``typ`` (if given).
         """
         links = self.links[:]
         for i in range(0, len(links)):
             link = links[i]
             if link.rel == rel:
                 link.resolve_stac_object(root=self.get_root())
-                yield cast("STACObject", link.target)
+                if typ is None or isinstance(link.target, typ):
+                    yield cast("STACObject", link.target)
 
     def save_object(
         self,
@@ -320,9 +316,9 @@ class STACObject(ABC):
             raised.
 
         Note:
-            When to include a self link is described in the `Use of Links section of the
-            STAC best practices document
-            <https://github.com/radiantearth/stac-spec/blob/v0.8.1/best-practices.md#use-of-links>`_
+            When to include a self link is described in the :stac-spec:`Use of Links
+            section of the STAC best practices document
+            <best-practices.md#use-of-links>`
         """
         if stac_io is None:
             root = self.get_root()
@@ -410,9 +406,10 @@ class STACObject(ABC):
 
         This method mutates the entire catalog tree.
         """
-        link_rels = set(self._object_links()) | set(
-            [pystac.RelType.ROOT, pystac.RelType.PARENT]
-        )
+        link_rels = set(self._object_links()) | {
+            pystac.RelType.ROOT,
+            pystac.RelType.PARENT,
+        }
 
         for link in self.links:
             if link.rel in link_rels:
@@ -425,7 +422,7 @@ class STACObject(ABC):
         STACObjects linked to by this object (not including root, parent or self).
         This can include optional relations (which may not be present).
         """
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def to_dict(self, include_self_link: bool = True) -> Dict[str, Any]:
@@ -437,7 +434,7 @@ class STACObject(ABC):
 
             dict: A serialization of the object that can be written out as JSON.
         """
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def clone(self) -> "STACObject":
@@ -451,7 +448,7 @@ class STACObject(ABC):
         Returns:
             STACObject: The clone of this object.
         """
-        pass
+        raise NotImplementedError
 
     @classmethod
     def from_file(
@@ -468,13 +465,17 @@ class STACObject(ABC):
             The specific STACObject implementation class that is represented
             by the JSON read from the file located at HREF.
         """
+        if cls == STACObject:
+            return pystac.read_file(href)
+
         if stac_io is None:
             stac_io = pystac.StacIO.default()
 
         if not is_absolute_href(href):
             href = make_absolute_href(href)
 
-        o = stac_io.read_stac_object(href)
+        d = stac_io.read_json(href)
+        o = cls.from_dict(d, href=href, migrate=True, preserve_dict=False)
 
         # Set the self HREF, if it's not already set to something else.
         if o.get_self_href() is None:
@@ -496,6 +497,7 @@ class STACObject(ABC):
         href: Optional[str] = None,
         root: Optional["Catalog_Type"] = None,
         migrate: bool = False,
+        preserve_dict: bool = True,
     ) -> "STACObject":
         """Parses this STACObject from the passed in dictionary.
 
@@ -503,13 +505,29 @@ class STACObject(ABC):
             d : The dict to parse.
             href : Optional href that is the file location of the object being
                 parsed.
-            root : Optional root of the catalog for this object.
-                If provided, the root's resolved object cache can be used to search for
-                previously resolved instances of the STAC object.
+            root : Optional root catalog for this object.
+                If provided, the root of the returned STACObject will be set
+                to this parameter.
             migrate: Use True if this dict represents JSON from an older STAC object,
                 so that migrations are run against it.
+            preserve_dict: If False, the dict parameter ``d`` may be modified
+                during this method call. Otherwise the dict is not mutated.
+                Defaults to True, which results results in a deepcopy of the
+                parameter. Set to False when possible to avoid the performance
+                hit of a deepcopy.
 
         Returns:
             STACObject: The STACObject parsed from this dict.
         """
-        pass
+        raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def matches_object_type(cls, d: Dict[str, Any]) -> bool:
+        """Returns a boolean indicating whether the given dictionary represents a valid
+        instance of this :class:`~STACObject` sub-class.
+
+        Args:
+            d : A dictionary to identify
+        """
+        raise NotImplementedError

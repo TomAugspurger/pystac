@@ -1,15 +1,14 @@
-from copy import copy, deepcopy
-from datetime import datetime as Datetime
+from copy import deepcopy
+from datetime import datetime
+from pystac.errors import STACTypeError
 from typing import (
     Any,
     Dict,
-    Generic,
     Iterable,
     List,
     Optional,
     TYPE_CHECKING,
     Tuple,
-    Type,
     TypeVar,
     Union,
     cast,
@@ -24,10 +23,17 @@ from pystac.asset import Asset
 from pystac.catalog import Catalog
 from pystac.layout import HrefLayoutStrategy
 from pystac.link import Link
-from pystac.utils import datetime_to_str, get_required
+from pystac.utils import datetime_to_str
+from pystac.serialization import (
+    identify_stac_object_type,
+    identify_stac_object,
+    migrate_to_latest,
+)
+from pystac.summaries import Summaries
 
 if TYPE_CHECKING:
     from pystac.item import Item as Item_Type
+    from pystac.provider import Provider as Provider_Type
 
 T = TypeVar("T")
 
@@ -41,14 +47,25 @@ class SpatialExtent:
             array must be 2*n where n is the number of dimensions. For example, a
             2D Collection with only one bbox would be [[xmin, ymin, xmax, ymax]]
 
-    Attributes:
-        bboxes : A list of bboxes that represent the spatial
-            extent of the collection. Each bbox can be 2D or 3D. The length of the bbox
-            array must be 2*n where n is the number of dimensions. For example, a
-            2D Collection with only one bbox would be [[xmin, ymin, xmax, ymax]]
+        extra_fields : Dictionary containing additional top-level fields defined on the
+            Spatial Extent object.
     """
 
-    def __init__(self, bboxes: Union[List[List[float]], List[float]]) -> None:
+    bboxes: List[List[float]]
+    """A list of bboxes that represent the spatial
+    extent of the collection. Each bbox can be 2D or 3D. The length of the bbox
+    array must be 2*n where n is the number of dimensions. For example, a
+    2D Collection with only one bbox would be [[xmin, ymin, xmax, ymax]]"""
+
+    extra_fields: Dict[str, Any]
+    """Dictionary containing additional top-level fields defined on the Spatial
+    Extent object."""
+
+    def __init__(
+        self,
+        bboxes: Union[List[List[float]], List[float]],
+        extra_fields: Optional[Dict[str, Any]] = None,
+    ) -> None:
         # A common mistake is to pass in a single bbox instead of a list of bboxes.
         # Account for this by transforming the input in that case.
         if isinstance(bboxes, list) and isinstance(bboxes[0], float):
@@ -56,13 +73,15 @@ class SpatialExtent:
         else:
             self.bboxes = cast(List[List[float]], bboxes)
 
+        self.extra_fields = extra_fields or {}
+
     def to_dict(self) -> Dict[str, Any]:
         """Generate a dictionary representing the JSON of this SpatialExtent.
 
         Returns:
             dict: A serialization of the SpatialExtent that can be written out as JSON.
         """
-        d = {"bbox": self.bboxes}
+        d = {"bbox": self.bboxes, **self.extra_fields}
         return d
 
     def clone(self) -> "SpatialExtent":
@@ -71,19 +90,25 @@ class SpatialExtent:
         Returns:
             SpatialExtent: The clone of this object.
         """
-        return SpatialExtent(deepcopy(self.bboxes))
+        return SpatialExtent(
+            bboxes=deepcopy(self.bboxes), extra_fields=deepcopy(self.extra_fields)
+        )
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "SpatialExtent":
-        """Constructs an SpatialExtent from a dict.
+        """Constructs a SpatialExtent from a dict.
 
         Returns:
             SpatialExtent: The SpatialExtent deserialized from the JSON dict.
         """
-        return SpatialExtent(bboxes=d["bbox"])
+        return SpatialExtent(
+            bboxes=d["bbox"], extra_fields={k: v for k, v in d.items() if k != "bbox"}
+        )
 
     @staticmethod
-    def from_coordinates(coordinates: List[Any]) -> "SpatialExtent":
+    def from_coordinates(
+        coordinates: List[Any], extra_fields: Optional[Dict[str, Any]] = None
+    ) -> "SpatialExtent":
         """Constructs a SpatialExtent from a set of coordinates.
 
         This method will only produce a single bbox that covers all points
@@ -91,6 +116,8 @@ class SpatialExtent:
 
         Args:
             coordinates : Coordinates to derive the bbox from.
+            extra_fields : Dictionary containing additional top-level fields defined on
+                the SpatialExtent object.
 
         Returns:
             SpatialExtent: A SpatialExtent with a single bbox that covers the
@@ -128,7 +155,9 @@ class SpatialExtent:
                 f"Could not determine bounds from coordinate sequence {coordinates}"
             )
 
-        return SpatialExtent([[xmin, ymin, xmax, ymax]])
+        return SpatialExtent(
+            bboxes=[[xmin, ymin, xmax, ymax]], extra_fields=extra_fields
+        )
 
 
 class TemporalExtent:
@@ -136,31 +165,40 @@ class TemporalExtent:
 
     Args:
         intervals :  A list of two datetimes wrapped in a list,
-        representing the temporal extent of a Collection. Open date ranges are supported
-        by setting either the start (the first element of the interval) or the end (the
-        second element of the interval) to None.
+            representing the temporal extent of a Collection. Open date ranges are
+            supported by setting either the start (the first element of the interval)
+            or the end (the second element of the interval) to None.
 
-
-    Attributes:
-        intervals :  A list of two datetimes wrapped in a list,
-        representing the temporal extent of a Collection. Open date ranges are
-        represented by either the start (the first element of the interval) or the
-        end (the second element of the interval) being None.
-
+        extra_fields : Dictionary containing additional top-level fields defined on the
+            Temporal Extent object.
     Note:
         Datetimes are required to be in UTC.
     """
 
+    intervals: List[List[Optional[datetime]]]
+    """A list of two datetimes wrapped in a list,
+    representing the temporal extent of a Collection. Open date ranges are
+    represented by either the start (the first element of the interval) or the
+    end (the second element of the interval) being None."""
+
+    extra_fields: Dict[str, Any]
+    """Dictionary containing additional top-level fields defined on the Temporal
+    Extent object."""
+
     def __init__(
-        self, intervals: Union[List[List[Optional[Datetime]]], List[Optional[Datetime]]]
+        self,
+        intervals: Union[List[List[Optional[datetime]]], List[Optional[datetime]]],
+        extra_fields: Optional[Dict[str, Any]] = None,
     ):
         # A common mistake is to pass in a single interval instead of a
         # list of intervals. Account for this by transforming the input
         # in that case.
-        if isinstance(intervals, list) and isinstance(intervals[0], Datetime):
-            self.intervals = [cast(List[Optional[Datetime]], intervals)]
+        if isinstance(intervals, list) and isinstance(intervals[0], datetime):
+            self.intervals = [cast(List[Optional[datetime]], intervals)]
         else:
-            self.intervals = cast(List[List[Optional[Datetime]]], intervals)
+            self.intervals = cast(List[List[Optional[datetime]]], intervals)
+
+        self.extra_fields = extra_fields or {}
 
     def to_dict(self) -> Dict[str, Any]:
         """Generate a dictionary representing the JSON of this TemporalExtent.
@@ -181,7 +219,7 @@ class TemporalExtent:
 
             encoded_intervals.append([start, end])
 
-        d = {"interval": encoded_intervals}
+        d = {"interval": encoded_intervals, **self.extra_fields}
         return d
 
     def clone(self) -> "TemporalExtent":
@@ -190,7 +228,9 @@ class TemporalExtent:
         Returns:
             TemporalExtent: The clone of this object.
         """
-        return TemporalExtent(intervals=deepcopy(self.intervals))
+        return TemporalExtent(
+            intervals=deepcopy(self.intervals), extra_fields=deepcopy(self.extra_fields)
+        )
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "TemporalExtent":
@@ -199,7 +239,7 @@ class TemporalExtent:
         Returns:
             TemporalExtent: The TemporalExtent deserialized from the JSON dict.
         """
-        parsed_intervals: List[List[Optional[Datetime]]] = []
+        parsed_intervals: List[List[Optional[datetime]]] = []
         for i in d["interval"]:
             start = None
             end = None
@@ -210,7 +250,10 @@ class TemporalExtent:
                 end = dateutil.parser.parse(i[1])
             parsed_intervals.append([start, end])
 
-        return TemporalExtent(intervals=parsed_intervals)
+        return TemporalExtent(
+            intervals=parsed_intervals,
+            extra_fields={k: v for k, v in d.items() if k != "interval"},
+        )
 
     @staticmethod
     def from_now() -> "TemporalExtent":
@@ -221,7 +264,7 @@ class TemporalExtent:
             TemporalExtent: The resulting TemporalExtent.
         """
         return TemporalExtent(
-            intervals=[[Datetime.utcnow().replace(microsecond=0), None]]
+            intervals=[[datetime.utcnow().replace(microsecond=0), None]]
         )
 
 
@@ -231,15 +274,29 @@ class Extent:
     Args:
         spatial : Potential spatial extent covered by the collection.
         temporal : Potential temporal extent covered by the collection.
-
-    Attributes:
-        spatial : Potential spatial extent covered by the collection.
-        temporal : Potential temporal extent covered by the collection.
+        extra_fields : Dictionary containing additional top-level fields defined on the
+            Extent object.
     """
 
-    def __init__(self, spatial: SpatialExtent, temporal: TemporalExtent):
+    spatial: SpatialExtent
+    """Potential spatial extent covered by the collection."""
+
+    temporal: TemporalExtent
+    """Potential temporal extent covered by the collection."""
+
+    extra_fields: Dict[str, Any]
+    """Dictionary containing additional top-level fields defined on the Extent
+    object."""
+
+    def __init__(
+        self,
+        spatial: SpatialExtent,
+        temporal: TemporalExtent,
+        extra_fields: Optional[Dict[str, Any]] = None,
+    ):
         self.spatial = spatial
         self.temporal = temporal
+        self.extra_fields = extra_fields or {}
 
     def to_dict(self) -> Dict[str, Any]:
         """Generate a dictionary representing the JSON of this Extent.
@@ -247,7 +304,11 @@ class Extent:
         Returns:
             dict: A serialization of the Extent that can be written out as JSON.
         """
-        d = {"spatial": self.spatial.to_dict(), "temporal": self.temporal.to_dict()}
+        d = {
+            "spatial": self.spatial.to_dict(),
+            "temporal": self.temporal.to_dict(),
+            **self.extra_fields,
+        }
 
         return d
 
@@ -257,7 +318,11 @@ class Extent:
         Returns:
             Extent: The clone of this extent.
         """
-        return Extent(spatial=copy(self.spatial), temporal=copy(self.temporal))
+        return Extent(
+            spatial=self.spatial.clone(),
+            temporal=self.temporal.clone(),
+            extra_fields=deepcopy(self.extra_fields),
+        )
 
     @staticmethod
     def from_dict(d: Dict[str, Any]) -> "Extent":
@@ -266,32 +331,24 @@ class Extent:
         Returns:
             Extent: The Extent deserialized from the JSON dict.
         """
-
-        # Handle pre-0.8 spatial extents
-        spatial_extent = d["spatial"]
-        if isinstance(spatial_extent, list):
-            spatial_extent_dict: Dict[str, Any] = {"bbox": [spatial_extent]}
-        else:
-            spatial_extent_dict = spatial_extent
-
-        # Handle pre-0.8 temporal extents
-        temporal_extent = d["temporal"]
-        if isinstance(temporal_extent, list):
-            temporal_extent_dict: Dict[str, Any] = {"interval": [temporal_extent]}
-        else:
-            temporal_extent_dict = temporal_extent
-
         return Extent(
-            SpatialExtent.from_dict(spatial_extent_dict),
-            TemporalExtent.from_dict(temporal_extent_dict),
+            spatial=SpatialExtent.from_dict(d["spatial"]),
+            temporal=TemporalExtent.from_dict(d["temporal"]),
+            extra_fields={
+                k: v for k, v in d.items() if k not in {"spatial", "temporal"}
+            },
         )
 
     @staticmethod
-    def from_items(items: Iterable["Item_Type"]) -> "Extent":
+    def from_items(
+        items: Iterable["Item_Type"], extra_fields: Optional[Dict[str, Any]] = None
+    ) -> "Extent":
         """Create an Extent based on the datetimes and bboxes of a list of items.
 
         Args:
             items : A list of items to derive the extent from.
+            extra_fields : Optional dictionary containing additional top-level fields
+                defined on the Extent object.
 
         Returns:
             Extent: An Extent that spatially and temporally covers all of the
@@ -303,9 +360,9 @@ class Extent:
             [float("-inf")],
             [float("-inf")],
         ]
-        datetimes: List[Datetime] = []
-        starts: List[Datetime] = []
-        ends: List[Datetime] = []
+        datetimes: List[datetime] = []
+        starts: List[datetime] = []
+        ends: List[datetime] = []
 
         for item in items:
             if item.bbox is not None:
@@ -349,156 +406,7 @@ class Extent:
         )
         temporal = TemporalExtent([[start_timestamp, end_timestamp]])
 
-        return Extent(spatial, temporal)
-
-
-class Provider:
-    """Provides information about a provider of STAC data. A provider is any of the
-    organizations that captured or processed the content of the collection and therefore
-    influenced the data offered by this collection. May also include information about
-    the final storage provider hosting the data.
-
-    Args:
-        name : The name of the organization or the individual.
-        description : Optional multi-line description to add further provider
-            information such as processing details for processors and producers,
-            hosting details for hosts or basic contact information.
-        roles : Optional roles of the provider. Any of
-            licensor, producer, processor or host.
-        url : Optional homepage on which the provider describes the dataset
-            and publishes contact information.
-
-    Attributes:
-        name : The name of the organization or the individual.
-        description : Optional multi-line description to add further provider
-            information such as processing details for processors and producers,
-            hosting details for hosts or basic contact information.
-        roles : Optional roles of the provider. Any of
-            licensor, producer, processor or host.
-        url : Optional homepage on which the provider describes the dataset
-            and publishes contact information.
-    """
-
-    def __init__(
-        self,
-        name: str,
-        description: Optional[str] = None,
-        roles: Optional[List[str]] = None,
-        url: Optional[str] = None,
-    ):
-        self.name = name
-        self.description = description
-        self.roles = roles
-        self.url = url
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Generate a dictionary representing the JSON of this Provider.
-
-        Returns:
-            dict: A serialization of the Provider that can be written out as JSON.
-        """
-        d: Dict[str, Any] = {"name": self.name}
-        if self.description is not None:
-            d["description"] = self.description
-        if self.roles is not None:
-            d["roles"] = self.roles
-        if self.url is not None:
-            d["url"] = self.url
-
-        return d
-
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "Provider":
-        """Constructs an Provider from a dict.
-
-        Returns:
-            TemporalExtent: The Provider deserialized from the JSON dict.
-        """
-        return Provider(
-            name=d["name"],
-            description=d.get("description"),
-            roles=d.get("roles"),
-            url=d.get("url"),
-        )
-
-
-class RangeSummary(Generic[T]):
-    def __init__(self, minimum: T, maximum: T):
-        self.minimum = minimum
-        self.maximum = maximum
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {"minimum": self.minimum, "maximum": self.maximum}
-
-    @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "RangeSummary[T]":
-        minimum: T = get_required(d.get("minimum"), "RangeSummary", "minimum")
-        maximum: T = get_required(d.get("maximum"), "RangeSummary", "maximum")
-        return cls(minimum=minimum, maximum=maximum)
-
-
-class Summaries:
-    def __init__(self, summaries: Dict[str, Any]) -> None:
-        self._summaries = summaries
-
-        self.lists: Dict[str, List[Any]] = {}
-        self.ranges: Dict[str, RangeSummary[Any]] = {}
-        self.schemas: Dict[str, Dict[str, Any]] = {}
-        self.other: Dict[str, Any] = {}
-
-        for prop_key, summary in summaries.items():
-            self.add(prop_key, summary)
-
-    def get_list(self, prop: str, typ: Type[T]) -> Optional[List[T]]:
-        return self.lists.get(prop)
-
-    def get_range(self, prop: str, typ: Type[T]) -> Optional[RangeSummary[T]]:
-        return self.ranges.get(prop)
-
-    def get_schema(self, prop: str) -> Optional[Dict[str, Any]]:
-        return self.schemas.get(prop)
-
-    def add(
-        self,
-        prop_key: str,
-        summary: Union[List[Any], RangeSummary[Any], Dict[str, Any]],
-    ) -> None:
-        if isinstance(summary, list):
-            self.lists[prop_key] = summary
-        elif isinstance(summary, dict):
-            if "minimum" in summary:
-                self.ranges[prop_key] = RangeSummary[Any].from_dict(
-                    cast(Dict[str, Any], summary)
-                )
-            else:
-                self.schemas[prop_key] = summary
-        elif isinstance(summary, RangeSummary):
-            self.ranges[prop_key] = summary
-        else:
-            self.other[prop_key] = summary
-
-    def remove(self, prop_key: str) -> None:
-        self.lists.pop(prop_key, None)
-        self.ranges.pop(prop_key, None)
-        self.schemas.pop(prop_key, None)
-        self.other.pop(prop_key, None)
-
-    def is_empty(self) -> bool:
-        return not (
-            any(self.lists) or any(self.ranges) or any(self.schemas) or any(self.other)
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            **self.lists,
-            **{k: v.to_dict() for k, v in self.ranges.items()},
-            **self.schemas,
-            **self.other,
-        }
-
-    @classmethod
-    def empty(cls) -> "Summaries":
-        return Summaries({})
+        return Extent(spatial=spatial, temporal=temporal, extra_fields=extra_fields)
 
 
 class Collection(Catalog):
@@ -508,7 +416,7 @@ class Collection(Catalog):
     Args:
         id : Identifier for the collection. Must be unique within the STAC.
         description : Detailed multi-line description to fully explain the
-            collection. `CommonMark 0.28 syntax <http://commonmark.org/>`_ MAY
+            collection. `CommonMark 0.28 syntax <https://commonmark.org/>`_ MAY
             be used for rich text representation.
         extent : Spatial and temporal extents that describe the bounds of
             all items contained within this Collection.
@@ -573,7 +481,7 @@ class Collection(Catalog):
         catalog_type: Optional[CatalogType] = None,
         license: str = "proprietary",
         keywords: Optional[List[str]] = None,
-        providers: Optional[List[Provider]] = None,
+        providers: Optional[List["Provider_Type"]] = None,
         summaries: Optional[Summaries] = None,
     ):
         super().__init__(
@@ -625,7 +533,8 @@ class Collection(Catalog):
         return d
 
     def clone(self) -> "Collection":
-        clone = Collection(
+        cls = self.__class__
+        clone = cls(
             id=self.id,
             description=self.description,
             extent=self.extent.clone(),
@@ -661,16 +570,20 @@ class Collection(Catalog):
         href: Optional[str] = None,
         root: Optional[Catalog] = None,
         migrate: bool = False,
+        preserve_dict: bool = True,
     ) -> "Collection":
         if migrate:
-            result = pystac.read_dict(d, href=href, root=root)
-            if not isinstance(result, Collection):
-                raise pystac.STACError(f"{result} is not a Catalog")
-            return result
+            info = identify_stac_object(d)
+            d = migrate_to_latest(d, info)
+
+        if not cls.matches_object_type(d):
+            raise STACTypeError(f"{d} does not represent a {cls.__name__} instance")
 
         catalog_type = CatalogType.determine_type(d)
 
-        d = deepcopy(d)
+        if preserve_dict:
+            d = deepcopy(d)
+
         id = d.pop("id")
         description = d.pop("description")
         license = d.pop("license")
@@ -680,7 +593,7 @@ class Collection(Catalog):
         keywords = d.get("keywords")
         providers = d.get("providers")
         if providers is not None:
-            providers = list(map(lambda x: Provider.from_dict(x), providers))
+            providers = list(map(lambda x: pystac.Provider.from_dict(x), providers))
         summaries = d.get("summaries")
         if summaries is not None:
             summaries = Summaries(summaries)
@@ -690,7 +603,7 @@ class Collection(Catalog):
 
         d.pop("stac_version")
 
-        collection = Collection(
+        collection = cls(
             id=id,
             description=description,
             extent=extent,
@@ -715,7 +628,10 @@ class Collection(Catalog):
 
         if assets is not None:
             for asset_key, asset_dict in assets.items():
-                collection.add_asset(asset_key, **Asset(asset_dict))
+                collection.add_asset(asset_key, Asset.from_dict(asset_dict))
+
+        if root:
+            collection.set_root(root)
 
         return collection
 
@@ -756,3 +672,7 @@ class Collection(Catalog):
         if not isinstance(result, Collection):
             raise pystac.STACTypeError(f"{result} is not a {Collection}.")
         return result
+
+    @classmethod
+    def matches_object_type(cls, d: Dict[str, Any]) -> bool:
+        return identify_stac_object_type(d) == STACObjectType.COLLECTION

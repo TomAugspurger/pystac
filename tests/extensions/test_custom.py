@@ -1,6 +1,6 @@
 """Tests creating a custom extension"""
 
-from pystac.collection import RangeSummary
+from pystac.summaries import RangeSummary
 from typing import Any, Dict, Generic, List, Optional, Set, TypeVar, Union, cast
 import unittest
 
@@ -62,7 +62,7 @@ class CustomExtension(
             return cast(CustomExtension[T], CatalogCustomExtension(obj))
 
         raise pystac.ExtensionTypeError(
-            f"Custom extension does not apply to {type(obj)}"
+            f"Custom extension does not apply to {type(obj).__name__}"
         )
 
     @staticmethod
@@ -94,7 +94,7 @@ class ItemCustomExtension(CustomExtension[pystac.Item]):
 class AssetCustomExtension(CustomExtension[pystac.Asset]):
     def __init__(self, asset: pystac.Asset) -> None:
         self.catalog = asset
-        self.properties = asset.properties
+        self.properties = asset.extra_fields
         if asset.owner:
             if isinstance(asset.owner, pystac.Item):
                 self.additional_read_properties = [asset.owner.properties]
@@ -106,7 +106,7 @@ class AssetCustomExtension(CustomExtension[pystac.Asset]):
 class SummariesCustomExtension(SummariesExtension):
     @property
     def test_prop(self) -> Optional[RangeSummary[str]]:
-        return self.summaries.get_range(TEST_PROP, str)
+        return self.summaries.get_range(TEST_PROP)
 
     @test_prop.setter
     def test_prop(self, v: Optional[RangeSummary[str]]) -> None:

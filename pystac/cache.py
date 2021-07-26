@@ -23,14 +23,14 @@ def get_cache_key(stac_object: "STACObject_Type") -> Tuple[str, bool]:
     """
     href = stac_object.get_self_href()
     if href is not None:
-        return (href, True)
+        return href, True
     else:
         ids: List[str] = []
         obj: Optional[pystac.STACObject] = stac_object
         while obj is not None:
             ids.append(obj.id)
             obj = obj.get_parent()
-        return ("/".join(ids), False)
+        return "/".join(ids), False
 
 
 class ResolvedObjectCache:
@@ -63,7 +63,7 @@ class ResolvedObjectCache:
         self,
         id_keys_to_objects: Optional[Dict[str, "STACObject_Type"]] = None,
         hrefs_to_objects: Optional[Dict[str, "STACObject_Type"]] = None,
-        ids_to_collections: Dict[str, "Collection_Type"] = None,
+        ids_to_collections: Optional[Dict[str, "Collection_Type"]] = None,
     ):
         self.id_keys_to_objects = id_keys_to_objects or {}
         self.hrefs_to_objects = hrefs_to_objects or {}
@@ -235,8 +235,12 @@ class CollectionCache:
 
     def __init__(
         self,
-        cached_ids: Dict[str, Union["Collection_Type", Dict[str, Any]]] = None,
-        cached_hrefs: Dict[str, Union["Collection_Type", Dict[str, Any]]] = None,
+        cached_ids: Optional[
+            Dict[str, Union["Collection_Type", Dict[str, Any]]]
+        ] = None,
+        cached_hrefs: Optional[
+            Dict[str, Union["Collection_Type", Dict[str, Any]]]
+        ] = None,
     ):
         self.cached_ids = cached_ids or {}
         self.cached_hrefs = cached_hrefs or {}
@@ -273,8 +277,12 @@ class ResolvedObjectCollectionCache(CollectionCache):
     def __init__(
         self,
         resolved_object_cache: ResolvedObjectCache,
-        cached_ids: Dict[str, Union["Collection_Type", Dict[str, Any]]] = None,
-        cached_hrefs: Dict[str, Union["Collection_Type", Dict[str, Any]]] = None,
+        cached_ids: Optional[
+            Dict[str, Union["Collection_Type", Dict[str, Any]]]
+        ] = None,
+        cached_hrefs: Optional[
+            Dict[str, Union["Collection_Type", Dict[str, Any]]]
+        ] = None,
     ):
         super().__init__(cached_ids, cached_hrefs)
         self.resolved_object_cache = resolved_object_cache

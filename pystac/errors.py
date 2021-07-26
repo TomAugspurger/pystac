@@ -19,6 +19,12 @@ class STACTypeError(Exception):
     pass
 
 
+class DuplicateObjectKeyError(Exception):
+    """Raised when deserializing a JSON object containing a duplicate key."""
+
+    pass
+
+
 class ExtensionTypeError(Exception):
     """An ExtensionTypeError is raised when an extension is used against
     an object that the extension does not apply to
@@ -33,6 +39,11 @@ class ExtensionAlreadyExistsError(Exception):
     for an extension with the same ID."""
 
     pass
+
+
+class ExtensionNotImplemented(Exception):
+    """Attempted to extend a STAC object that does not implement the given
+    extension."""
 
 
 class RequiredPropertyMissing(Exception):

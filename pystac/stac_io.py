@@ -3,7 +3,6 @@ import os
 import json
 from typing import (
     Any,
-    Callable,
     Dict,
     List,
     Optional,
@@ -12,18 +11,22 @@ from typing import (
     Type,
     Union,
 )
-import warnings
 
-from urllib.parse import urlparse
 from urllib.request import urlopen
 from urllib.error import HTTPError
 
 import pystac
-import pystac.serialization
+from pystac.utils import safe_urlparse
+from pystac.serialization import (
+    merge_common_properties,
+    identify_stac_object_type,
+    identify_stac_object,
+    migrate_to_latest,
+)
 
 # Use orjson if available
 try:
-    import orjson  # type: ignore
+    import orjson
 except ImportError:
     orjson = None  # type: ignore[assignment]
 
@@ -42,19 +45,24 @@ class StacIO(ABC):
     ) -> str:
         """Read text from the given URI.
 
-        The source to read from can be specified
-        as a string or a Link. If it's a string, it's the URL of the HREF from which to
-        read. When reading links, PySTAC will pass in the entire link body.
-        This enables implementations to utilize additional link information,
-        e.g. the "post" information in a pagination link from a STAC API search.
+        The source to read from can be specified as a string or a
+        :class:`~pystac.Link`. If it is a string, it must be a URI or local path from
+        which to read. Using a :class:`~pystac.Link` enables implementations to use
+        additional link information, such as paging information contained in the
+        extended links described in the `STAC API spec
+        <https://github.com/radiantearth/stac-api-spec/tree/master/item-search#paging>`__.
 
         Args:
             source : The source to read from.
+            *args : Arbitrary positional arguments that may be utilized by the concrete
+                implementation.
+            **kwargs : Arbitrary keyword arguments that may be utilized by the concrete
+                implementation.
 
         Returns:
             str: The text contained in the file at the location specified by the uri.
         """
-        raise NotImplementedError("read_text not implemented")
+        raise NotImplementedError
 
     @abstractmethod
     def write_text(
@@ -62,45 +70,114 @@ class StacIO(ABC):
     ) -> None:
         """Write the given text to a file at the given URI.
 
-        The destination to write to from can be specified
-        as a string or a Link. If it's a string, it's the URL of the HREF from which to
-        read. When writing based on links links, PySTAC will pass in the entire
-        link body.
+        The destination to write to from can be specified as a string or a
+        :class:`~pystac.Link`. If it is a string, it must be a URI or local path from
+        which to read. Using a :class:`~pystac.Link` enables implementations to use
+        additional link information.
 
         Args:
             dest : The destination to write to.
             txt : The text to write.
         """
-        raise NotImplementedError("write_text not implemented")
+        raise NotImplementedError
 
-    def _json_loads(self, txt: str, source: Union[str, "Link_Type"]) -> Dict[str, Any]:
-        if orjson is not None:
-            return orjson.loads(txt)
-        else:
-            return json.loads(txt)
+    def json_loads(self, txt: str, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        """Method used internally by :class:`StacIO` instances to deserialize a
+        dictionary from a JSON string.
 
-    def _json_dumps(
-        self, json_dict: Dict[str, Any], source: Union[str, "Link_Type"]
-    ) -> str:
+        This method may be overwritten in :class:`StacIO` sub-classes to provide custom
+        deserialization logic. The method accepts arbitrary keyword arguments. These are
+        not used by the default implementation, but may be used by sub-class
+        implementations.
+
+        Args:
+
+            txt : The JSON string to deserialize to a dictionary.
+        """
+        result: Dict[str, Any]
         if orjson is not None:
-            return orjson.dumps(json_dict, option=orjson.OPT_INDENT_2).decode("utf-8")
+            result = orjson.loads(txt)
         else:
-            return json.dumps(json_dict, indent=2)
+            result = json.loads(txt, *args, **kwargs)
+        return result
+
+    def json_dumps(self, json_dict: Dict[str, Any], *args: Any, **kwargs: Any) -> str:
+        """Method used internally by :class:`StacIO` instances to serialize a dictionary
+        to a JSON string.
+
+        This method may be overwritten in :class:`StacIO` sub-classes to provide custom
+        serialization logic. The method accepts arbitrary keyword arguments. These are
+        not used by the default implementation, but may be used by sub-class
+        implementations.
+
+        Args:
+
+            json_dict : The dictionary to serialize
+        """
+        if orjson is not None:
+            return orjson.dumps(json_dict, option=orjson.OPT_INDENT_2, **kwargs).decode(
+                "utf-8"
+            )
+        else:
+            return json.dumps(json_dict, *args, indent=2, **kwargs)
 
     def stac_object_from_dict(
         self,
         d: Dict[str, Any],
         href: Optional[str] = None,
         root: Optional["Catalog_Type"] = None,
+        preserve_dict: bool = True,
     ) -> "STACObject_Type":
-        result = pystac.serialization.stac_object_from_dict(d, href, root)
-        if isinstance(result, pystac.Catalog):
-            # Set the stac_io instance for usage by io operations
-            # where this catalog is the root.
-            result._stac_io = self
-        return result
+        """Deserializes a :class:`~pystac.STACObject` sub-class instance from a
+        dictionary.
 
-    def read_json(self, source: Union[str, "Link_Type"]) -> Dict[str, Any]:
+        Args:
+
+            d : The dictionary to deserialize
+            href : Optional href to associate with the STAC object
+            root : Optional root :class:`~pystac.Catalog` to associate with the
+                STAC object.
+            preserve_dict: If ``False``, the dict parameter ``d`` may be modified
+                during this method call. Otherwise the dict is not mutated.
+                Defaults to ``True``, which results results in a deepcopy of the
+                parameter. Set to ``False`` when possible to avoid the performance
+                hit of a deepcopy.
+        """
+        if identify_stac_object_type(d) == pystac.STACObjectType.ITEM:
+            collection_cache = None
+            if root is not None:
+                collection_cache = root._resolved_objects.as_collection_cache()
+
+            # Merge common properties in case this is an older STAC object.
+            merge_common_properties(
+                d, json_href=href, collection_cache=collection_cache
+            )
+
+        info = identify_stac_object(d)
+        d = migrate_to_latest(d, info)
+
+        if info.object_type == pystac.STACObjectType.CATALOG:
+            result = pystac.Catalog.from_dict(
+                d, href=href, root=root, migrate=False, preserve_dict=preserve_dict
+            )
+            result._stac_io = self
+            return result
+
+        if info.object_type == pystac.STACObjectType.COLLECTION:
+            return pystac.Collection.from_dict(
+                d, href=href, root=root, migrate=False, preserve_dict=preserve_dict
+            )
+
+        if info.object_type == pystac.STACObjectType.ITEM:
+            return pystac.Item.from_dict(
+                d, href=href, root=root, migrate=False, preserve_dict=preserve_dict
+            )
+
+        raise ValueError(f"Unknown STAC object type {info.object_type}")
+
+    def read_json(
+        self, source: Union[str, "Link_Type"], *args: Any, **kwargs: Any
+    ) -> Dict[str, Any]:
         """Read a dict from the given source.
 
         See :func:`StacIO.read_text <pystac.StacIO.read_text>` for usage of
@@ -108,16 +185,24 @@ class StacIO(ABC):
 
         Args:
             source : The source from which to read.
+            *args : Additional positional arguments to be passed to
+                :meth:`StacIO.read_text`.
+            **kwargs : Additional keyword arguments to be passed to
+                :meth:`StacIO.read_text`.
 
         Returns:
             dict: A dict representation of the JSON contained in the file at the
             given source.
         """
-        txt = self.read_text(source)
-        return self._json_loads(txt, source)
+        txt = self.read_text(source, *args, **kwargs)
+        return self.json_loads(txt)
 
     def read_stac_object(
-        self, source: Union[str, "Link_Type"], root: Optional["Catalog_Type"] = None
+        self,
+        source: Union[str, "Link_Type"],
+        root: Optional["Catalog_Type"] = None,
+        *args: Any,
+        **kwargs: Any,
     ) -> "STACObject_Type":
         """Read a STACObject from a JSON file at the given source.
 
@@ -129,17 +214,25 @@ class StacIO(ABC):
             root : Optional root of the catalog for this object.
                 If provided, the root's resolved object cache can be used to search for
                 previously resolved instances of the STAC object.
+            *args : Additional positional arguments to be passed to
+                :meth:`StacIO.read_json`.
+            **kwargs : Additional keyword arguments to be passed to
+                :meth:`StacIO.read_json`.
 
         Returns:
             STACObject: The deserialized STACObject from the serialized JSON
             contained in the file at the given uri.
         """
-        d = self.read_json(source)
+        d = self.read_json(source, *args, **kwargs)
         href = source if isinstance(source, str) else source.get_absolute_href()
-        return self.stac_object_from_dict(d, href=href, root=root)
+        return self.stac_object_from_dict(d, href=href, root=root, preserve_dict=False)
 
     def save_json(
-        self, dest: Union[str, "Link_Type"], json_dict: Dict[str, Any]
+        self,
+        dest: Union[str, "Link_Type"],
+        json_dict: Dict[str, Any],
+        *args: Any,
+        **kwargs: Any,
     ) -> None:
         """Write a dict to the given URI as JSON.
 
@@ -149,8 +242,12 @@ class StacIO(ABC):
         Args:
             dest : The destination file to write the text to.
             json_dict : The JSON dict to write.
+            *args : Additional positional arguments to be passed to
+                :meth:`StacIO.json_dumps`.
+            **kwargs : Additional keyword arguments to be passed to
+                :meth:`StacIO.json_dumps`.
         """
-        txt = self._json_dumps(json_dict, dest)
+        txt = self.json_dumps(json_dict, *args, **kwargs)
         self.write_text(dest, txt)
 
     @classmethod
@@ -167,9 +264,11 @@ class StacIO(ABC):
 
 
 class DefaultStacIO(StacIO):
-    def read_text(
-        self, source: Union[str, "Link_Type"], *args: Any, **kwargs: Any
-    ) -> str:
+    def read_text(self, source: Union[str, "Link_Type"], *_: Any, **__: Any) -> str:
+        """A concrete implementation of :meth:`StacIO.read_text
+        <pystac.StacIO.read_text>`. Converts the ``source`` argument to a string (if it
+        is not already) and delegates to :meth:`DefaultStacIO.read_text_from_href` for
+        opening and reading the file."""
         href: Optional[str]
         if isinstance(source, str):
             href = source
@@ -177,23 +276,39 @@ class DefaultStacIO(StacIO):
             href = source.get_absolute_href()
             if href is None:
                 raise IOError(f"Could not get an absolute HREF from link {source}")
-        return self.read_text_from_href(href, *args, **kwargs)
+        return self.read_text_from_href(href)
 
-    def read_text_from_href(self, href: str, *args: Any, **kwargs: Any) -> str:
-        parsed = urlparse(href)
+    def read_text_from_href(self, href: str) -> str:
+        """Reads file as a UTF-8 string.
+
+        If ``href`` has a "scheme" (e.g. if it starts with "https://") then this will
+        use :func:`urllib.request.urlopen` to open the file and read the contents;
+        otherwise, :func:`open` will be used to open a local file.
+
+        Args:
+
+            href : The URI of the file to open.
+        """
+        parsed = safe_urlparse(href)
+        href_contents: str
         if parsed.scheme != "":
             try:
                 with urlopen(href) as f:
-                    return f.read().decode("utf-8")
+                    href_contents = f.read().decode("utf-8")
             except HTTPError as e:
                 raise Exception("Could not read uri {}".format(href)) from e
         else:
-            with open(href) as f:
-                return f.read()
+            with open(href, encoding="utf-8") as f:
+                href_contents = f.read()
+        return href_contents
 
     def write_text(
-        self, dest: Union[str, "Link_Type"], txt: str, *args: Any, **kwargs: Any
+        self, dest: Union[str, "Link_Type"], txt: str, *_: Any, **__: Any
     ) -> None:
+        """A concrete implementation of :meth:`StacIO.write_text
+        <pystac.StacIO.write_text>`. Converts the ``dest`` argument to a string (if it
+        is not already) and delegates to :meth:`DefaultStacIO.write_text_from_href` for
+        opening and reading the file."""
         href: Optional[str]
         if isinstance(dest, str):
             href = dest
@@ -201,193 +316,76 @@ class DefaultStacIO(StacIO):
             href = dest.get_absolute_href()
             if href is None:
                 raise IOError(f"Could not get an absolute HREF from link {dest}")
-        return self.write_text_to_href(href, txt, *args, **kwargs)
+        return self.write_text_to_href(href, txt)
 
-    def write_text_to_href(
-        self, href: str, txt: str, *args: Any, **kwargs: Any
-    ) -> None:
+    def write_text_to_href(self, href: str, txt: str) -> None:
+        """Writes text to file using UTF-8 encoding.
+
+        This implementation uses :func:`open` and therefore can only write to the local
+        file system.
+
+        Args:
+
+            href : The path to which the file will be written.
+            txt : The string content to write to the file.
+        """
         dirname = os.path.dirname(href)
         if dirname != "" and not os.path.isdir(dirname):
             os.makedirs(dirname)
-        with open(href, "w") as f:
+        with open(href, "w", encoding="utf-8") as f:
             f.write(txt)
 
 
-class DuplicateObjectKeyError(Exception):
-    pass
-
-
 class DuplicateKeyReportingMixin(StacIO):
-    """A mixin for StacIO implementations that will report
+    """A mixin for :class:`pystac.StacIO` implementations that will report
     on duplicate keys in the JSON being read in.
 
     See https://github.com/stac-utils/pystac/issues/313
     """
 
-    def _json_loads(self, txt: str, source: Union[str, "Link_Type"]) -> Dict[str, Any]:
-        return json.loads(
-            txt, object_pairs_hook=self.duplicate_object_names_report_builder(source)
+    def json_loads(self, txt: str, *_: Any, **__: Any) -> Dict[str, Any]:
+        """Overwrites :meth:`StacIO.json_loads <pystac.StacIO.json_loads>` as the
+        internal method used by :class:`DuplicateKeyReportingMixin` for deserializing
+        a JSON string to a dictionary while checking for duplicate object keys.
+
+        Raises:
+
+            pystac.DuplicateObjectKeyError : If a duplicate object key is found.
+        """
+        result: Dict[str, Any] = json.loads(
+            txt, object_pairs_hook=self._report_duplicate_object_names
         )
+        return result
+
+    def read_json(
+        self, source: Union[str, "Link_Type"], *args: Any, **kwargs: Any
+    ) -> Dict[str, Any]:
+        """Overwrites :meth:`StacIO.read_json <pystac.StacIO.read_json>` for
+        deserializing a JSON file to a dictionary while checking for duplicate object
+        keys.
+
+        Raises:
+
+            pystac.DuplicateObjectKeyError : If a duplicate object key is found.
+        """
+        txt = self.read_text(source, *args, **kwargs)
+        try:
+            return self.json_loads(txt, source=source)
+        except pystac.DuplicateObjectKeyError as e:
+            url = source if isinstance(source, str) else source.get_absolute_href()
+            msg = str(e) + f" in {url}"
+            raise pystac.DuplicateObjectKeyError(msg)
 
     @staticmethod
-    def duplicate_object_names_report_builder(
-        source: Union[str, "Link_Type"]
-    ) -> Callable[[List[Tuple[str, Any]]], Dict[str, Any]]:
-        def report_duplicate_object_names(
-            object_pairs: List[Tuple[str, Any]]
-        ) -> Dict[str, Any]:
-            result: Dict[str, Any] = {}
-            for key, value in object_pairs:
-                if key in result:
-                    url = (
-                        source
-                        if isinstance(source, str)
-                        else source.get_absolute_href()
-                    )
-                    raise DuplicateObjectKeyError(
-                        f"Found duplicate object name “{key}” in “{url}”"
-                    )
-                else:
-                    result[key] = value
-            return result
-
-        return report_duplicate_object_names
-
-
-class STAC_IO:
-    """DEPRECATED: Methods used to read and save STAC json.
-    Allows users of the library to set their own methods
-    (e.g. for reading and writing from cloud storage)
-
-    Note: The static methods of this class are deprecated. Move to using
-    instance methods of a specific instance of StacIO.
-    """
-
-    @staticmethod
-    def read_text_method(uri: str) -> str:
-        warnings.warn(
-            "STAC_IO is deprecated. "
-            "Please use instances of StacIO (e.g. StacIO.default()).",
-            DeprecationWarning,
-        )
-        return StacIO.default().read_text(uri)
-
-    @staticmethod
-    def write_text_method(uri: str, txt: str) -> None:
-        """Default method for writing text."""
-        warnings.warn(
-            "STAC_IO is deprecated. "
-            "Please use instances of StacIO (e.g. StacIO.default()).",
-            DeprecationWarning,
-        )
-        return StacIO.default().write_text(uri, txt)
-
-    @staticmethod
-    def stac_object_from_dict(
-        d: Dict[str, Any],
-        href: Optional[str] = None,
-        root: Optional["Catalog_Type"] = None,
-    ) -> "STACObject_Type":
-        warnings.warn(
-            "STAC_IO is deprecated. "
-            "Please use instances of StacIO (e.g. StacIO.default()).",
-            DeprecationWarning,
-        )
-        return pystac.serialization.stac_object_from_dict(d, href, root)
-
-    # This is set in __init__.py
-    _STAC_OBJECT_CLASSES = None
-
-    @classmethod
-    def read_text(cls, uri: str) -> str:
-        """Read text from the given URI.
-
-        Args:
-            uri : The URI from which to read text.
-
-        Returns:
-            str: The text contained in the file at the location specified by the uri.
-
-        Note:
-            This method uses the :func:`STAC_IO.read_text_method
-            <STAC_IO.read_text_method>`. If you want to modify the behavior of
-            STAC_IO in order to enable additional URI types, replace that member
-            with your own implementation.
-        """
-        return cls.read_text_method(uri)
-
-    @classmethod
-    def write_text(cls, uri: str, txt: str) -> None:
-        """Write the given text to a file at the given URI.
-
-        Args:
-            uri : The URI of the file to write the text to.
-            txt : The text to write.
-
-        Note:
-            This method uses the :func:`STAC_IO.write_text_method
-            <STAC_IO.write_text_method>`. If you want to modify the behavior of
-            STAC_IO in order to enable additional URI types, replace that member
-            with your own implementation.
-        """
-        cls.write_text_method(uri, txt)
-
-    @classmethod
-    def read_json(cls, uri: str) -> Dict[str, Any]:
-        """Read a dict from the given URI.
-
-        Args:
-            uri : The URI from which to read.
-
-        Returns:
-            dict: A dict representation of the JSON contained in the file at the
-            given uri.
-
-        Note:
-            This method uses the :func:`STAC_IO.read_text_method
-            <STAC_IO.read_text_method>`. If you want to modify the behavior of
-            STAC_IO in order to enable additional URI types, replace that member
-            with your own implementation.
-        """
-        return json.loads(STAC_IO.read_text(uri))
-
-    @classmethod
-    def read_stac_object(
-        cls, uri: str, root: Optional["Catalog_Type"] = None
-    ) -> "STACObject_Type":
-        """Read a STACObject from a JSON file at the given URI.
-
-        Args:
-            uri : The URI from which to read.
-            root : Optional root of the catalog for this object.
-                If provided, the root's resolved object cache can be used to search for
-                previously resolved instances of the STAC object.
-
-        Returns:
-            STACObject: The deserialized STACObject from the serialized JSON
-            contained in the file at the given uri.
-
-        Note:
-            This method uses the :func:`STAC_IO.read_text_method
-            <STAC_IO.read_text_method>`. If you want to modify the behavior of
-            STAC_IO in order to enable additional URI types, replace that member
-            with your own implementation.
-        """
-        d = cls.read_json(uri)
-        return cls.stac_object_from_dict(d, uri, root)
-
-    @classmethod
-    def save_json(cls, uri: str, json_dict: Dict[str, Any]) -> None:
-        """Write a dict to the given URI as JSON.
-
-        Args:
-            uri : The URI of the file to write the text to.
-            json_dict : The JSON dict to write.
-
-        Note:
-            This method uses the :func:`STAC_IO.write_text_method
-            <STAC_IO.write_text_method>`. If you want to modify the behavior of
-            STAC_IO in order to enable additional URI types, replace that member
-            with your own implementation.
-        """
-        STAC_IO.write_text(uri, json.dumps(json_dict, indent=4))
+    def _report_duplicate_object_names(
+        object_pairs: List[Tuple[str, Any]]
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for key, value in object_pairs:
+            if key in result:
+                raise pystac.DuplicateObjectKeyError(
+                    f'Found duplicate object name "{key}"'
+                )
+            else:
+                result[key] = value
+        return result

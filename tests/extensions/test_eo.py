@@ -2,11 +2,12 @@ import json
 import unittest
 
 import pystac
-from pystac import Item
-from pystac.collection import RangeSummary
+from pystac import ExtensionTypeError, Item
+from pystac.summaries import RangeSummary
 from pystac.utils import get_opt
 from pystac.extensions.eo import EOExtension, Band
-from tests.utils import TestCases, test_to_from_dict
+from pystac.extensions.projection import ProjectionExtension
+from tests.utils import TestCases, assert_to_from_dict
 
 
 class BandsTest(unittest.TestCase):
@@ -42,6 +43,8 @@ class EOTest(unittest.TestCase):
         "data-files/eo/sample-bands-in-item-properties.json"
     )
     EO_COLLECTION_URI = TestCases.get_path("data-files/eo/eo-collection.json")
+    S2_ITEM_URI = TestCases.get_path("data-files/eo/eo-sentinel2-item.json")
+    PLAIN_ITEM = TestCases.get_path("data-files/item/sample-item.json")
 
     def setUp(self) -> None:
         self.maxDiff = None
@@ -49,11 +52,29 @@ class EOTest(unittest.TestCase):
     def test_to_from_dict(self) -> None:
         with open(self.LANDSAT_EXAMPLE_URI) as f:
             item_dict = json.load(f)
-        test_to_from_dict(self, Item, item_dict)
+        assert_to_from_dict(self, Item, item_dict)
+
+    def test_add_to(self) -> None:
+        item = Item.from_file(self.PLAIN_ITEM)
+        self.assertNotIn(EOExtension.get_schema_uri(), item.stac_extensions)
+
+        # Check that the URI gets added to stac_extensions
+        EOExtension.add_to(item)
+        self.assertIn(EOExtension.get_schema_uri(), item.stac_extensions)
+
+        # Check that the URI only gets added once, regardless of how many times add_to
+        # is called.
+        EOExtension.add_to(item)
+        EOExtension.add_to(item)
+
+        eo_uris = [
+            uri for uri in item.stac_extensions if uri == EOExtension.get_schema_uri()
+        ]
+        self.assertEqual(len(eo_uris), 1)
 
     def test_validate_eo(self) -> None:
-        item = pystac.read_file(self.LANDSAT_EXAMPLE_URI)
-        item2 = pystac.read_file(self.BANDS_IN_ITEM_URI)
+        item = pystac.Item.from_file(self.LANDSAT_EXAMPLE_URI)
+        item2 = pystac.Item.from_file(self.BANDS_IN_ITEM_URI)
         item.validate()
         item2.validate()
 
@@ -83,6 +104,11 @@ class EOTest(unittest.TestCase):
         self.assertEqual(len(EOExtension.ext(item).bands or []), 3)
         item.validate()
 
+    def test_asset_bands_s2(self) -> None:
+        item = pystac.Item.from_file(self.S2_ITEM_URI)
+        mtd_asset = item.get_assets()["mtd"]
+        self.assertIsNone(EOExtension.ext(mtd_asset).bands)
+
     def test_asset_bands(self) -> None:
         item = pystac.Item.from_file(self.LANDSAT_EXAMPLE_URI)
 
@@ -93,6 +119,7 @@ class EOTest(unittest.TestCase):
         assert asset_bands is not None
         self.assertEqual(len(asset_bands), 1)
         self.assertEqual(asset_bands[0].name, "B1")
+        self.assertEqual(asset_bands[0].solar_illumination, 2000)
 
         index_asset = item.assets["index"]
         asset_bands = EOExtension.ext(index_asset).bands
@@ -115,15 +142,27 @@ class EOTest(unittest.TestCase):
 
         # Check adding a new asset
         new_bands = [
-            Band.create(name="red", description=Band.band_description("red")),
-            Band.create(name="green", description=Band.band_description("green")),
-            Band.create(name="blue", description=Band.band_description("blue")),
+            Band.create(
+                name="red",
+                description=Band.band_description("red"),
+                solar_illumination=1900,
+            ),
+            Band.create(
+                name="green",
+                description=Band.band_description("green"),
+                solar_illumination=1950,
+            ),
+            Band.create(
+                name="blue",
+                description=Band.band_description("blue"),
+                solar_illumination=2000,
+            ),
         ]
         asset = pystac.Asset(href="some/path.tif", media_type=pystac.MediaType.GEOTIFF)
         EOExtension.ext(asset).bands = new_bands
         item.add_asset("test", asset)
 
-        self.assertEqual(len(item.assets["test"].properties["eo:bands"]), 3)
+        self.assertEqual(len(item.assets["test"].extra_fields["eo:bands"]), 3)
 
     def test_cloud_cover(self) -> None:
         item = pystac.Item.from_file(self.LANDSAT_EXAMPLE_URI)
@@ -176,6 +215,23 @@ class EOTest(unittest.TestCase):
         self.assertEqual(len(col_dict["summaries"]["eo:bands"]), 1)
         self.assertEqual(col_dict["summaries"]["eo:cloud_cover"]["minimum"], 1.0)
 
+    def test_summaries_adds_uri(self) -> None:
+        col = pystac.Collection.from_file(self.EO_COLLECTION_URI)
+        col.stac_extensions = []
+        self.assertRaisesRegex(
+            pystac.ExtensionNotImplemented,
+            r"Could not find extension schema URI.*",
+            EOExtension.summaries,
+            col,
+            False,
+        )
+        _ = EOExtension.summaries(col, add_if_missing=True)
+
+        self.assertIn(EOExtension.get_schema_uri(), col.stac_extensions)
+
+        EOExtension.remove_from(col)
+        self.assertNotIn(EOExtension.get_schema_uri(), col.stac_extensions)
+
     def test_read_pre_09_fields_into_common_metadata(self) -> None:
         eo_item = pystac.Item.from_file(
             TestCases.get_path(
@@ -226,3 +282,75 @@ class EOTest(unittest.TestCase):
 
         with self.assertRaises(pystac.ExtensionTypeError):
             EOExtension.ext(link)  # type: ignore
+
+    def test_extension_not_implemented(self) -> None:
+        # Should raise exception if Item does not include extension URI
+        item = pystac.Item.from_file(self.PLAIN_ITEM)
+
+        with self.assertRaises(pystac.ExtensionNotImplemented):
+            _ = EOExtension.ext(item)
+
+        # Should raise exception if owning Item does not include extension URI
+        asset = item.assets["thumbnail"]
+
+        with self.assertRaises(pystac.ExtensionNotImplemented):
+            _ = EOExtension.ext(asset)
+
+        # Should succeed if Asset has no owner
+        ownerless_asset = pystac.Asset.from_dict(asset.to_dict())
+        _ = EOExtension.ext(ownerless_asset)
+
+    def test_item_ext_add_to(self) -> None:
+        item = pystac.Item.from_file(self.PLAIN_ITEM)
+        self.assertNotIn(EOExtension.get_schema_uri(), item.stac_extensions)
+
+        _ = EOExtension.ext(item, add_if_missing=True)
+
+        self.assertIn(EOExtension.get_schema_uri(), item.stac_extensions)
+
+    def test_asset_ext_add_to(self) -> None:
+        item = pystac.Item.from_file(self.PLAIN_ITEM)
+        self.assertNotIn(EOExtension.get_schema_uri(), item.stac_extensions)
+        asset = item.assets["thumbnail"]
+
+        _ = EOExtension.ext(asset, add_if_missing=True)
+
+        self.assertIn(EOExtension.get_schema_uri(), item.stac_extensions)
+
+    def test_asset_ext_add_to_ownerless_asset(self) -> None:
+        item = pystac.Item.from_file(self.PLAIN_ITEM)
+        asset_dict = item.assets["thumbnail"].to_dict()
+        asset = pystac.Asset.from_dict(asset_dict)
+
+        with self.assertRaises(pystac.STACError):
+            _ = EOExtension.ext(asset, add_if_missing=True)
+
+    def test_should_raise_exception_when_passing_invalid_extension_object(
+        self,
+    ) -> None:
+        self.assertRaisesRegex(
+            ExtensionTypeError,
+            r"^EO extension does not apply to type 'object'$",
+            EOExtension.ext,
+            object(),
+        )
+
+
+class EOMigrationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.maxDiff = None
+        self.item_0_8_path = TestCases.get_path(
+            "data-files/examples/0.8.1/item-spec/examples/sentinel2-sample.json"
+        )
+
+    def test_migration(self) -> None:
+        with open(self.item_0_8_path) as src:
+            item_dict = json.load(src)
+
+        self.assertIn("eo:epsg", item_dict["properties"])
+
+        item = Item.from_file(self.item_0_8_path)
+
+        self.assertNotIn("eo:epsg", item.properties)
+        self.assertIn("proj:epsg", item.properties)
+        self.assertIn(ProjectionExtension.get_schema_uri(), item.stac_extensions)

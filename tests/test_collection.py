@@ -1,18 +1,49 @@
+from copy import deepcopy
 import unittest
 import os
 import json
-from tempfile import TemporaryDirectory
 from datetime import datetime
 from dateutil import tz
+import tempfile
 
 import pystac
 from pystac.extensions.eo import EOExtension
 from pystac.validation import validate_dict
-from pystac import Collection, Item, Extent, SpatialExtent, TemporalExtent, CatalogType
-from pystac.utils import datetime_to_str
+from pystac import (
+    Collection,
+    Item,
+    Extent,
+    SpatialExtent,
+    TemporalExtent,
+    CatalogType,
+    Provider,
+)
+from pystac.utils import datetime_to_str, get_required
 from tests.utils import TestCases, ARBITRARY_GEOM, ARBITRARY_BBOX
 
 TEST_DATETIME = datetime(2020, 3, 14, 16, 32)
+
+
+class ProviderTest(unittest.TestCase):
+    def test_to_from_dict(self) -> None:
+        provider_dict = {
+            "name": "Remote Data, Inc",
+            "description": "Producers of awesome spatiotemporal assets",
+            "roles": ["producer", "processor"],
+            "url": "http://remotedata.io",
+            "extension:field": "some value",
+        }
+        expected_extra_fields = {"extension:field": provider_dict["extension:field"]}
+
+        provider = Provider.from_dict(provider_dict)
+
+        self.assertEqual(provider_dict["name"], provider.name)
+        self.assertEqual(provider_dict["description"], provider.description)
+        self.assertEqual(provider_dict["roles"], provider.roles)
+        self.assertEqual(provider_dict["url"], provider.url)
+        self.assertDictEqual(expected_extra_fields, provider.extra_fields)
+
+        self.assertDictEqual(provider_dict, provider.to_dict())
 
 
 class CollectionTest(unittest.TestCase):
@@ -35,7 +66,7 @@ class CollectionTest(unittest.TestCase):
         collection = TestCases.test_case_8()
         assert collection.STAC_OBJECT_TYPE == pystac.STACObjectType.COLLECTION
         self.assertEqual(collection.catalog_type, CatalogType.SELF_CONTAINED)
-        with TemporaryDirectory() as tmp_dir:
+        with tempfile.TemporaryDirectory() as tmp_dir:
             collection.normalize_hrefs(tmp_dir)
             href = collection.self_href
             collection.save()
@@ -84,7 +115,7 @@ class CollectionTest(unittest.TestCase):
 
         collection.extra_fields["test"] = "extra"
 
-        with TemporaryDirectory() as tmp_dir:
+        with tempfile.TemporaryDirectory() as tmp_dir:
             p = os.path.join(tmp_dir, "collection.json")
             collection.save_object(include_self_link=False, dest_href=p)
             with open(p) as f:
@@ -175,8 +206,63 @@ class CollectionTest(unittest.TestCase):
         # cached only by HREF
         self.assertEqual(len(cache.id_keys_to_objects), 0)
 
+    def test_assets(self) -> None:
+        path = TestCases.get_path("data-files/collections/with-assets.json")
+        with open(path) as f:
+            data = json.load(f)
+        collection = pystac.Collection.from_dict(data)
+        collection.validate()
+
+    def test_from_dict_preserves_dict(self) -> None:
+        path = TestCases.get_path("data-files/collections/with-assets.json")
+        with open(path) as f:
+            collection_dict = json.load(f)
+        param_dict = deepcopy(collection_dict)
+
+        # test that the parameter is preserved
+        _ = Collection.from_dict(param_dict)
+        self.assertEqual(param_dict, collection_dict)
+
+        # assert that the parameter is not preserved with
+        # non-default parameter
+        _ = Collection.from_dict(param_dict, preserve_dict=False)
+        self.assertNotEqual(param_dict, collection_dict)
+
+    def test_from_dict_set_root(self) -> None:
+        path = TestCases.get_path("data-files/examples/hand-0.8.1/collection.json")
+        with open(path) as f:
+            collection_dict = json.load(f)
+        catalog = pystac.Catalog(id="test", description="test desc")
+        collection = Collection.from_dict(collection_dict, root=catalog)
+        self.assertIs(collection.get_root(), catalog)
+
+    def test_schema_summary(self) -> None:
+        collection = pystac.Collection.from_file(
+            TestCases.get_path(
+                "data-files/examples/1.0.0/collection-only/collection-with-schemas.json"
+            )
+        )
+        instruments_schema = get_required(
+            collection.summaries.get_schema("instruments"),
+            collection.summaries,
+            "instruments",
+        )
+
+        self.assertIsInstance(instruments_schema, dict)
+
+    def test_from_invalid_dict_raises_exception(self) -> None:
+        stac_io = pystac.StacIO.default()
+        catalog_dict = stac_io.read_json(
+            TestCases.get_path("data-files/catalogs/test-case-1/catalog.json")
+        )
+        with self.assertRaises(pystac.STACTypeError):
+            _ = pystac.Collection.from_dict(catalog_dict)
+
 
 class ExtentTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.maxDiff = None
+
     def test_spatial_allows_single_bbox(self) -> None:
         temporal_extent = TemporalExtent(intervals=[[TEST_DATETIME, None]])
 
@@ -243,3 +329,76 @@ class ExtentTest(unittest.TestCase):
 
         self.assertEqual(interval[0], datetime(2000, 1, 1, 12, 0, 0, 0, tzinfo=tz.UTC))
         self.assertEqual(interval[1], datetime(2001, 1, 1, 12, 0, 0, 0, tzinfo=tz.UTC))
+
+    def test_to_from_dict(self) -> None:
+        spatial_dict = {
+            "bbox": [
+                [
+                    172.91173669923782,
+                    1.3438851951615003,
+                    172.95469614953714,
+                    1.3690476620161975,
+                ]
+            ],
+            "extension:field": "spatial value",
+        }
+        temporal_dict = {
+            "interval": [
+                ["2020-12-11T22:38:32.125000Z", "2020-12-14T18:02:31.437000Z"]
+            ],
+            "extension:field": "temporal value",
+        }
+        extent_dict = {
+            "spatial": spatial_dict,
+            "temporal": temporal_dict,
+            "extension:field": "extent value",
+        }
+        expected_extent_extra_fields = {
+            "extension:field": extent_dict["extension:field"],
+        }
+        expected_spatial_extra_fields = {
+            "extension:field": spatial_dict["extension:field"],
+        }
+        expected_temporal_extra_fields = {
+            "extension:field": temporal_dict["extension:field"],
+        }
+
+        extent = Extent.from_dict(extent_dict)
+
+        self.assertDictEqual(expected_extent_extra_fields, extent.extra_fields)
+        self.assertDictEqual(expected_spatial_extra_fields, extent.spatial.extra_fields)
+        self.assertDictEqual(
+            expected_temporal_extra_fields, extent.temporal.extra_fields
+        )
+
+        self.assertDictEqual(extent_dict, extent.to_dict())
+
+
+class CollectionSubClassTest(unittest.TestCase):
+    """This tests cases related to creating classes inheriting from pystac.Catalog to
+    ensure that inheritance, class methods, etc. function as expected."""
+
+    MULTI_EXTENT = TestCases.get_path("data-files/collections/multi-extent.json")
+
+    class BasicCustomCollection(pystac.Collection):
+        pass
+
+    def setUp(self) -> None:
+        self.stac_io = pystac.StacIO.default()
+
+    def test_from_dict_returns_subclass(self) -> None:
+        collection_dict = self.stac_io.read_json(self.MULTI_EXTENT)
+        custom_collection = self.BasicCustomCollection.from_dict(collection_dict)
+
+        self.assertIsInstance(custom_collection, self.BasicCustomCollection)
+
+    def test_from_file_returns_subclass(self) -> None:
+        custom_collection = self.BasicCustomCollection.from_file(self.MULTI_EXTENT)
+
+        self.assertIsInstance(custom_collection, self.BasicCustomCollection)
+
+    def test_clone(self) -> None:
+        custom_collection = self.BasicCustomCollection.from_file(self.MULTI_EXTENT)
+        cloned_collection = custom_collection.clone()
+
+        self.assertIsInstance(cloned_collection, self.BasicCustomCollection)
